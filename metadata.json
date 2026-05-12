@@ -1,0 +1,7 @@
+{
+  "name": "Remix: Gerador de Roteiro e Locução D\u0027 MASTER PRODUTORA",
+  "description": "Um roteirista técnico avançado e motor de locução multi-voz com Fenrir e Sadaltager.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
