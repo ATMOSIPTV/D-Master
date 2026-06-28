@@ -7,17 +7,10 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
-# Dependencies
 node_modules
 dist
 dist-ssr
 *.local
-
-# Environment variables (SEGURANÇA - Nunca commitar!)
-.env
-.env.local
-.env.*.local
-.env.production.local
 
 # Editor directories and files
 .vscode/*
@@ -29,16 +22,3 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
-
-# Histórico de prompts (AI Studio)
-migrated_prompt_history/
-
-# OS files
-Thumbs.db
-.DS_Store
-
-# IDE
-*.iml
-.classpath
-.c9/
-*.class
