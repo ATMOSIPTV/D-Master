@@ -43,6 +43,17 @@ export function encode(bytes: Uint8Array): string {
  * Cria um arquivo WAV (header + data) a partir de PCM 16-bit mono.
  */
 export function createWavBlob(pcmData: Uint8Array, sampleRate: number): Blob {
+  // Se o buffer já for um contêiner WAV (RIFF), retorna diretamente como Blob WAV
+  if (
+    pcmData.length >= 12 &&
+    pcmData[0] === 0x52 && // 'R'
+    pcmData[1] === 0x49 && // 'I'
+    pcmData[2] === 0x46 && // 'F'
+    pcmData[3] === 0x46    // 'F'
+  ) {
+    return new Blob([pcmData], { type: 'audio/wav' });
+  }
+
   const header = new ArrayBuffer(44);
   const view = new DataView(header);
 

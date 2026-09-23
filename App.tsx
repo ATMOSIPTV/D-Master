@@ -5,13 +5,25 @@ import {
   ScriptOutput, 
   VoiceName, 
   AVAILABLE_VOICES, 
+  getGeminiVoiceName,
   NARRATIVE_STYLES, 
   DURATIONS,
   TONES, 
   EMOTIONS,
-  PERSONAS
+  PERSONAS,
+  AudioEffectPreset,
+  AUDIO_EFFECT_PRESETS,
+  SfxProfile,
+  SFX_PROFILES
 } from './types';
 import { decode, decodeAudioData, createWavBlob } from './services/audioUtils';
+import {
+  buildAudioEffectsChain,
+  processAudioBufferWithEffects,
+  audioBufferToWavBlob,
+  RADIO_SFX_TRIGGERS,
+  EqualizerSettings
+} from './services/audioEffects';
 import { 
   Zap, 
   Gem, 
@@ -29,6 +41,7 @@ import {
   Download,
   FileText,
   Volume2,
+  VolumeX,
   ChevronRight,
   Sparkles,
   Radio,
@@ -43,7 +56,17 @@ import {
   Info,
   ImagePlus,
   Trash2,
-  Upload
+  Upload,
+  Key,
+  HelpCircle,
+  ExternalLink,
+  ShieldAlert,
+  Sliders,
+  SlidersHorizontal,
+  Wand2,
+  Music,
+  Disc,
+  Activity
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { clsx, type ClassValue } from 'clsx';
@@ -81,6 +104,20 @@ const App: React.FC = () => {
   const [targetDuration, setTargetDuration] = useState(30);
   const [selectedPersona, setSelectedPersona] = useState(PERSONAS[0].id);
   const [singleSpeaker, setSingleSpeaker] = useState(false);
+
+  // Audio Effects & Master DSP States
+  const [sfxProfile, setSfxProfile] = useState<SfxProfile>('radio_standard');
+  const [activeAudioEffect, setActiveAudioEffect] = useState<AudioEffectPreset>('broadcast_fm');
+  const [effectIntensity, setEffectIntensity] = useState<number>(85);
+  const [effectBypass, setEffectBypass] = useState<boolean>(false);
+  const [eqSettings, setEqSettings] = useState<EqualizerSettings>({
+    bass: 2.5,
+    mid: 1.5,
+    treble: 2.0
+  });
+  const [showEffectsModal, setShowEffectsModal] = useState<boolean>(false);
+  const [activeSfxTriggerId, setActiveSfxTriggerId] = useState<string | null>(null);
+  const [exportingWav, setExportingWav] = useState<boolean>(false);
   
   // Voice Settings
   const [dutraVoice, setDutraVoice] = useState<VoiceName>('Charon');
@@ -88,10 +125,75 @@ const App: React.FC = () => {
   
   const [showSettings, setShowSettings] = useState(false);
   const [showAbout, setShowAbout] = useState(false);
+  const [showApiHelp, setShowApiHelp] = useState(false);
+  const [showTutorial, setShowTutorial] = useState(false);
+  const [tutorialTab, setTutorialTab] = useState<'quickstart' | 'personas' | 'effects' | 'image' | 'faq'>('quickstart');
+  const [testingApi, setTestingApi] = useState(false);
+  const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
   const [aboutTab, setAboutTab] = useState<'map' | 'recipes' | 'tips' | 'engine'>('map');
   const [campaignImage, setCampaignImage] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
+
+  const getApiKey = () => {
+    return (
+      process.env.GEMINI_API_KEY ||
+      process.env.API_KEY ||
+      (typeof window !== 'undefined' && (window as any).__GEMINI_API_KEY__) ||
+      ''
+    );
+  };
+
+  const parseApiError = (err: any): string => {
+    const raw = (err?.message || err?.statusText || String(err)).toLowerCase();
+    if (raw.includes('permission_denied') || raw.includes('403') || raw.includes('caller does not have permission') || raw.includes('api negada')) {
+      return "API Negada (Erro 403 / Permissão): A chave de API não possui permissão para a Generative Language API ou possui restrições ativas. Clique em 'Como Resolver' para o guia detalhado.";
+    }
+    if (raw.includes('api key not valid') || raw.includes('api_key_invalid') || raw.includes('invalid api key')) {
+      return "Chave Inválida: A chave GEMINI_API_KEY configurada não é válida ou foi revogada.";
+    }
+    if (raw.includes('quota') || raw.includes('resource_exhausted') || raw.includes('429')) {
+      return "Cota de API Excedida (Erro 429): Limite de requisições por minuto atingido. Aguarde 1 minuto e tente novamente.";
+    }
+    if (raw.includes('não encontrada no ambiente') || raw.includes('chave de api')) {
+      return "Chave de API não encontrada: Configure GEMINI_API_KEY nas variáveis de ambiente ou arquivo .env.";
+    }
+    return err?.message || "Erro desconhecido na comunicação com a API Google Gemini.";
+  };
+
+  const testApiConnection = async () => {
+    setTestingApi(true);
+    setTestResult(null);
+    try {
+      const apiKey = getApiKey();
+      if (!apiKey) {
+        throw new Error("Chave GEMINI_API_KEY não foi encontrada no ambiente (.env).");
+      }
+      const ai = new GoogleGenAI({ apiKey });
+      const res = await ai.models.generateContent({
+        model: 'gemini-3.8-flash',
+        contents: 'Responda com apenas uma palavra: OK',
+      });
+      if (res.text) {
+        setTestResult({
+          success: true,
+          message: "Conexão com a API Google Gemini validada com sucesso! A chave está autorizada e pronta para produzir."
+        });
+        addLog("Teste de API Gemini bem-sucedido.", "success");
+      } else {
+        throw new Error("A API respondeu mas sem conteúdo.");
+      }
+    } catch (e: any) {
+      const friendly = parseApiError(e);
+      setTestResult({
+        success: false,
+        message: friendly
+      });
+      addLog("Falha no teste de conexão da API.", "warn");
+    } finally {
+      setTestingApi(false);
+    }
+  };
 
   // System Logs State
   const [logs, setLogs] = useState<{ id: number; msg: string; type: 'info' | 'warn' | 'success' }[]>([]);
@@ -197,6 +299,19 @@ const App: React.FC = () => {
     addLog("Imagem da campanha removida.", "info");
   };
 
+  const triggerSoundEffect = (trigger: (ctx: AudioContext) => void, id: string) => {
+    try {
+      const ctx = initAudioContext();
+      if (ctx.state === 'suspended') ctx.resume();
+      trigger(ctx);
+      setActiveSfxTriggerId(id);
+      setTimeout(() => setActiveSfxTriggerId(null), 700);
+      addLog(`Efeito sonoro disparado: ${id.toUpperCase()}`, "info");
+    } catch (e) {
+      console.error("Erro ao disparar SFX:", e);
+    }
+  };
+
   const generateScript = async () => {
     if (!theme.trim()) return;
     setLoading(true);
@@ -205,7 +320,7 @@ const App: React.FC = () => {
     setGeneratedAudio(null);
     
     try {
-      const apiKey = process.env.GEMINI_API_KEY;
+      const apiKey = getApiKey();
       if (!apiKey) {
         throw new Error("Chave de API (GEMINI_API_KEY) não encontrada no ambiente.");
       }
@@ -213,8 +328,14 @@ const App: React.FC = () => {
       const ai = new GoogleGenAI({ apiKey });
       const durationLabel = targetDuration === 0 ? "Tempo Livre" : `${targetDuration} segundos`;
       
+      const selectedSfx = SFX_PROFILES.find(p => p.id === sfxProfile) || SFX_PROFILES[0];
+      const sfxInstructions = `- PERFIL DE EFEITOS SONOROS (SFX): ${selectedSfx.label}.
+        Estilo de Sonoplastia: ${selectedSfx.description}.
+        Tags de efeitos recomendadas para sfx_hints e sfx_tag: ${selectedSfx.tags.map(t => `[SFX: ${t}]`).join(', ')}.
+        O campo sfx_hints DEVE conter sugestões alinhadas a este estilo de efeitos e transições sonoras.`;
+
       addLog(`Iniciando síntese D' MASTER PRODUTORA...`, "info");
-      addLog(`Estilo: ${styleLabel} | Persona: ${personaLabel}`, "info");
+      addLog(`Estilo: ${styleLabel} | Persona: ${personaLabel} | SFX: ${selectedSfx.label}`, "info");
 
       const personaInstructions = selectedPersona === 'caipira' 
         ? "- Use dialeto caipira autêntico (ex: 'uai', 'sô', 'trem', 'r' retroflexo/puxado, gírias do interior)."
@@ -245,6 +366,7 @@ const App: React.FC = () => {
         ${singleSpeaker ? `- Use APENAS o locutor DUTRA com a persona ${personaLabel}.` : `- Use os dois locutores para contraste. O locutor principal (DUTRA) DEVE usar a persona ${personaLabel}.`}
         ${personaInstructions}
         ${styleInstructions}
+        ${sfxInstructions}
         - Use GATILHOS MENTAIS.
         - Use o campo 'direction' para descrever detalhadamente a INTENCIONALIDADE, EMOÇÃO e VARIAÇÃO DE VOLUME (ex: [Gritando com empolgação], [Sussurrando oferta secreta], [Subindo o tom gradualmente]).
         - REGRAS DE TEXTO: Mantenha a grafia correta das palavras. NUNCA alongue vogais artificialmente (evite 'Promoçãaaaao'). A emoção deve vir da interpretação, não da escrita deformada.
@@ -272,7 +394,7 @@ const App: React.FC = () => {
       }
 
       const response = await ai.models.generateContent({
-        model: 'gemini-3-flash-preview',
+        model: 'gemini-3.8-flash',
         contents: contents,
         config: {
           responseMimeType: "application/json",
@@ -319,7 +441,8 @@ const App: React.FC = () => {
       showSuccess("Roteiro Criativo Gerado!");
     } catch (err: any) {
       console.error("Erro no generateScript:", err);
-      setError(`Erro na síntese: ${err.message || "Erro desconhecido"}`);
+      const friendly = parseApiError(err);
+      setError(friendly);
       addLog("Falha na síntese do roteiro.", "warn");
     } finally {
       setLoading(false);
@@ -331,6 +454,11 @@ const App: React.FC = () => {
     setScript(null);
     setGeneratedAudio(null);
     setError(null);
+    setSfxProfile('radio_standard');
+    setActiveAudioEffect('broadcast_fm');
+    setEffectIntensity(85);
+    setEffectBypass(false);
+    setEqSettings({ bass: 2.5, mid: 1.5, treble: 2.0 });
     addLog("Console reinicializado.", "info");
   };
 
@@ -358,11 +486,27 @@ const App: React.FC = () => {
       try {
         const ctx = initAudioContext();
         if (ctx.state === 'suspended') await ctx.resume();
-        const audioBuffer = await decodeAudioData(generatedAudio, ctx, 24000, 1);
+        let audioBuffer: AudioBuffer;
+        try {
+          const copy = generatedAudio.buffer.slice(generatedAudio.byteOffset, generatedAudio.byteOffset + generatedAudio.byteLength);
+          audioBuffer = await ctx.decodeAudioData(copy);
+        } catch {
+          audioBuffer = await decodeAudioData(generatedAudio, ctx, 24000, 1);
+        }
         const source = ctx.createBufferSource();
         sourceRef.current = source;
         source.buffer = audioBuffer;
-        source.connect(ctx.destination);
+        
+        // Roteamento pelo processador de efeitos DSP
+        const effectOutput = buildAudioEffectsChain(
+          ctx,
+          source,
+          effectBypass ? 'none' : activeAudioEffect,
+          effectIntensity,
+          eqSettings
+        );
+        effectOutput.connect(ctx.destination);
+
         source.onended = () => {
           setPlaying(false);
           sourceRef.current = null;
@@ -379,73 +523,182 @@ const App: React.FC = () => {
     setError(null);
     addLog("Iniciando renderização de áudio...", "info");
     try {
-      const apiKey = process.env.GEMINI_API_KEY;
+      const apiKey = getApiKey();
       if (!apiKey) {
-        throw new Error("Chave de API não encontrada.");
+        throw new Error("Chave de API (GEMINI_API_KEY) não encontrada no ambiente.");
       }
 
       const ai = new GoogleGenAI({ apiKey });
       
-      const isDynamic = narrativeStyle === 'dynamic_retail';
-      const isMotivational = narrativeStyle === 'motivational';
-      
-      // Se for locutor único, removemos os nomes dos locutores do prompt para evitar confusão
-      const ttsPrompt = `Interprete este roteiro com EMOÇÃO HUMANA, FLUIDEZ PREMIUM e RESPIRAÇÃO NATURAL.
-      Busque uma entrega natural e contínua (Legato), evitando pausas artificiais. A pontuação deve ser interpretada como inflexão vocal, não como interrupção de fluxo.
-      ${isDynamic ? 'Use uma voz de comercial de rádio profissional, alta energia e persuasiva, mas muito fluida.' : ''}
-      ${isMotivational ? 'Use um tom inspirador e elegante, com passagens suaves entre os sentimentos.' : ''}
-      ${narrativeStyle === 'sound_truck' ? 'Use uma voz de alto impacto, mas com dicção limpa e fluxo contínuo.' : ''}
-      ${selectedPersona === 'rodeio' ? 'Use uma voz épica e potente, mantendo o fôlego e a conexão entre as frases.' : ''}
-      
-      Roteiro:
-      ` + script.lines.map(line => {
-        const speakerPart = singleSpeaker ? "" : `${line.speaker}: `;
-        return `${speakerPart}(Direção: ${line.direction}) ${line.text}`;
-      }).join('\n');
-
-      const speechConfig: any = {};
-      if (singleSpeaker) {
-        speechConfig.voiceConfig = {
-          prebuiltVoiceConfig: { voiceName: dutraVoice }
-        };
-      } else {
-        speechConfig.multiSpeakerVoiceConfig = {
-          speakerVoiceConfigs: [
-            {
-              speaker: 'DUTRA',
-              voiceConfig: { prebuiltVoiceConfig: { voiceName: dutraVoice } }
-            },
-            {
-              speaker: 'Sadaltager',
-              voiceConfig: { prebuiltVoiceConfig: { voiceName: sadaltagerVoice } }
-            }
-          ]
-        };
+      const validLines = script.lines.filter(l => l && l.text && l.text.trim().length > 0);
+      if (validLines.length === 0) {
+        throw new Error("O roteiro não contém linhas de texto para locução.");
       }
 
-      const response = await ai.models.generateContent({
-        model: "gemini-2.5-flash-preview-tts",
-        contents: [{ parts: [{ text: ttsPrompt }] }],
-        config: {
-          responseModalities: [Modality.AUDIO],
-          speechConfig
+      const uniqueSpeakers = Array.from(new Set(validLines.map(l => l.speaker)));
+      const isMultiSpeaker = !singleSpeaker && uniqueSpeakers.length > 1;
+
+      const styleDescription = [
+        narrativeStyle === 'dynamic_retail' ? 'Comercial dinâmico, alta energia e persuasivo' : '',
+        narrativeStyle === 'motivational' ? 'Inspirador e elegante' : '',
+        narrativeStyle === 'sound_truck' ? 'Locução de alto impacto, dicção limpa e potente' : '',
+        selectedPersona === 'rodeio' ? 'Locutor épico de rodeio, potente e contínuo' : '',
+        selectedPersona === 'caipira' ? 'Sotaque caipira autêntico' : '',
+      ].filter(Boolean).join(', ') || 'Locução profissional fluida';
+
+      let pcmBytes: Uint8Array;
+
+      if (isMultiSpeaker) {
+        addLog("Renderizando áudio multi-voz com 2 locutores (DUTRA e Sadaltager)...", "info");
+
+        // Construir cada parte com speech_metadata explícito para cada locutor
+        const parts = validLines.map(line => {
+          const speakerName = line.speaker === 'Sadaltager' ? 'Sadaltager' : 'DUTRA';
+          const lineStyle = [line.direction, styleDescription].filter(Boolean).join('. ');
+          return {
+            text: `${speakerName}: ${line.text}`,
+            speech_metadata: {
+              speaker: speakerName,
+              style: lineStyle
+            },
+            speechMetadata: {
+              speaker: speakerName,
+              style: lineStyle
+            }
+          };
+        });
+
+        // Garantir que ambos os locutores estejam presentes para cumprir a validação da API
+        const hasDutra = parts.some(p => p.speech_metadata.speaker === 'DUTRA');
+        const hasSadaltager = parts.some(p => p.speech_metadata.speaker === 'Sadaltager');
+        if (!hasDutra && parts.length > 0) {
+          parts[0].speech_metadata.speaker = 'DUTRA';
+          parts[0].speechMetadata.speaker = 'DUTRA';
+          parts[0].text = `DUTRA: ${validLines[0].text}`;
         }
-      });
+        if (!hasSadaltager && parts.length > 1) {
+          parts[1].speech_metadata.speaker = 'Sadaltager';
+          parts[1].speechMetadata.speaker = 'Sadaltager';
+          parts[1].text = `Sadaltager: ${validLines[1].text}`;
+        }
 
-      const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-      if (!base64Audio) throw new Error("Falha na renderização do áudio.");
+        const requestBody = {
+          contents: [
+            {
+              role: "user",
+              parts: parts
+            }
+          ],
+          generationConfig: {
+            responseModalities: ["AUDIO"],
+            speechConfig: {
+              multiSpeakerVoiceConfig: {
+                speakerVoiceConfigs: [
+                  {
+                    speaker: 'DUTRA',
+                    voiceConfig: { prebuiltVoiceConfig: { voiceName: getGeminiVoiceName(dutraVoice) } }
+                  },
+                  {
+                    speaker: 'Sadaltager',
+                    voiceConfig: { prebuiltVoiceConfig: { voiceName: getGeminiVoiceName(sadaltagerVoice) } }
+                  }
+                ]
+              }
+            }
+          }
+        };
 
-      addLog("Áudio renderizado. Iniciando reprodução.", "success");
-      const pcmBytes = decode(base64Audio);
+        const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash-tts:generateContent?key=${encodeURIComponent(apiKey)}`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(requestBody)
+        });
+
+        const responseData = await res.json();
+        if (!res.ok) {
+          const errObj = responseData?.error || responseData;
+          throw new Error(errObj?.message || JSON.stringify(errObj));
+        }
+
+        const candidateParts = responseData.candidates?.[0]?.content?.parts || [];
+        const audioParts = candidateParts.filter((p: any) => p.inlineData?.data);
+        if (audioParts.length === 0) {
+          throw new Error("Falha na renderização do áudio: nenhum bloco de áudio retornado pelo modelo.");
+        }
+
+        const decodedChunks = audioParts.map((p: any) => decode(p.inlineData.data));
+        const totalLength = decodedChunks.reduce((acc: number, cur: Uint8Array) => acc + cur.length, 0);
+        pcmBytes = new Uint8Array(totalLength);
+        let offset = 0;
+        for (const chunk of decodedChunks) {
+          pcmBytes.set(chunk, offset);
+          offset += chunk.length;
+        }
+      } else {
+        // Modo 1 locutor (individual)
+        addLog("Renderizando áudio com 1 locutor...", "info");
+        const fullScriptText = validLines.map(l => l.text).join(' ');
+        
+        const response = await ai.models.generateContent({
+          model: "gemini-3.8-flash-lite-tts",
+          contents: [
+            {
+              role: "user",
+              parts: [
+                {
+                  text: fullScriptText,
+                  speechMetadata: {
+                    style: styleDescription
+                  }
+                }
+              ]
+            }
+          ] as any,
+          config: {
+            responseModalities: [Modality.AUDIO],
+            speechConfig: {
+              voiceConfig: {
+                prebuiltVoiceConfig: { voiceName: getGeminiVoiceName(dutraVoice) }
+              }
+            }
+          }
+        });
+
+        const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+        if (!base64Audio) throw new Error("Falha na renderização do áudio.");
+        pcmBytes = decode(base64Audio);
+      }
+
+      addLog("Áudio renderizado com sucesso. Iniciando reprodução.", "success");
       setGeneratedAudio(pcmBytes);
 
       const ctx = initAudioContext();
       if (ctx.state === 'suspended') await ctx.resume();
-      const audioBuffer = await decodeAudioData(pcmBytes, ctx, 24000, 1);
+
+      let audioBuffer: AudioBuffer;
+      try {
+        const copy = pcmBytes.buffer.slice(pcmBytes.byteOffset, pcmBytes.byteOffset + pcmBytes.byteLength);
+        audioBuffer = await ctx.decodeAudioData(copy);
+      } catch {
+        audioBuffer = await decodeAudioData(pcmBytes, ctx, 24000, 1);
+      }
+
       const source = ctx.createBufferSource();
       sourceRef.current = source;
       source.buffer = audioBuffer;
-      source.connect(ctx.destination);
+
+      // Roteamento pelo processador de efeitos DSP
+      const effectOutput = buildAudioEffectsChain(
+        ctx,
+        source,
+        effectBypass ? 'none' : activeAudioEffect,
+        effectIntensity,
+        eqSettings
+      );
+      effectOutput.connect(ctx.destination);
+
       source.onended = () => {
         setPlaying(false);
         sourceRef.current = null;
@@ -453,23 +706,72 @@ const App: React.FC = () => {
       source.start();
     } catch (err: any) {
       console.error("Erro no playScript:", err);
-      setError(err.message || "Erro na interpretação de áudio.");
+      const friendly = parseApiError(err);
+      setError(friendly);
+      addLog("Falha na geração de áudio.", "warn");
       setPlaying(false);
     }
   };
 
-  const downloadAudio = () => {
+  const downloadAudio = async (withEffects: boolean = true) => {
     if (!generatedAudio || !script) return;
-    const blob = createWavBlob(generatedAudio, 24000);
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `SPOT_${script.title.replace(/\s+/g, '_')}.wav`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-    showSuccess("Master exportada em WAV!");
+    setExportingWav(true);
+    try {
+      if (!withEffects || effectBypass || (activeAudioEffect === 'none' && eqSettings.bass === 0 && eqSettings.mid === 0 && eqSettings.treble === 0)) {
+        const blob = createWavBlob(generatedAudio, 24000);
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `SPOT_${script.title.replace(/\s+/g, '_')}_CLEAN.wav`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        showSuccess("Master Clean exportada em WAV!");
+        return;
+      }
+
+      addLog(`Masterizando WAV com efeito ${activeAudioEffect.toUpperCase()}...`, "info");
+      const ctx = initAudioContext();
+      let audioBuffer: AudioBuffer;
+      try {
+        const copy = generatedAudio.buffer.slice(generatedAudio.byteOffset, generatedAudio.byteOffset + generatedAudio.byteLength);
+        audioBuffer = await ctx.decodeAudioData(copy);
+      } catch {
+        audioBuffer = await decodeAudioData(generatedAudio, ctx, 24000, 1);
+      }
+
+      const processedBuffer = await processAudioBufferWithEffects(
+        audioBuffer,
+        activeAudioEffect,
+        effectIntensity,
+        eqSettings
+      );
+      const wavBlob = audioBufferToWavBlob(processedBuffer);
+      const url = URL.createObjectURL(wavBlob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `SPOT_${script.title.replace(/\s+/g, '_')}_MASTER_${activeAudioEffect.toUpperCase()}.wav`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      showSuccess(`Master WAV com efeito ${activeAudioEffect.toUpperCase()} exportada!`);
+    } catch (err: any) {
+      console.error("Erro ao exportar com efeitos:", err);
+      const blob = createWavBlob(generatedAudio, 24000);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `SPOT_${script.title.replace(/\s+/g, '_')}.wav`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      showSuccess("Master exportada em WAV!");
+    } finally {
+      setExportingWav(false);
+    }
   };
 
   const exportScript = () => {
@@ -488,9 +790,14 @@ const App: React.FC = () => {
     content += `ESTILO: ${styleLabel?.toUpperCase()}\n\n`;
     
     content += `--------------------------------------------------------------------------------\n`;
-    content += `DIRETRIZES DE ÁUDIO (SONOPLASTIA)\n`;
+    content += `DIRETRIZES DE ÁUDIO (SONOPLASTIA & EFEITOS)\n`;
     content += `--------------------------------------------------------------------------------\n`;
-    content += `TRILHA: ${script.bgm_suggestion.toUpperCase()}\n\n`;
+    content += `TRILHA: ${script.bgm_suggestion.toUpperCase()}\n`;
+    const sfxOption = SFX_PROFILES.find(p => p.id === sfxProfile);
+    const effectOption = AUDIO_EFFECT_PRESETS.find(p => p.id === activeAudioEffect);
+    content += `PERFIL DE SFX: ${sfxOption?.label.toUpperCase() || 'PADRÃO'}\n`;
+    content += `PROCESSAMENTO MASTER: ${effectOption?.label.toUpperCase() || 'PADRÃO'} (${effectIntensity}% WET)\n`;
+    content += `TAGS SUGERIDAS: ${script.sfx_hints.join(', ').toUpperCase()}\n\n`;
     
     content += `--------------------------------------------------------------------------------\n`;
     content += `TEXTO E LOCUÇÃO\n`;
@@ -661,15 +968,22 @@ const App: React.FC = () => {
         <header className="flex flex-col md:flex-row justify-between items-start md:items-center mb-10 gap-6 border-b border-white/10 pb-8">
           <div className="flex items-center gap-5">
             <motion.div 
-              initial={{ rotate: -10, scale: 0.9 }}
-              animate={{ rotate: 3, scale: 1 }}
-              className="relative"
+              initial={{ rotate: -6, scale: 0.9 }}
+              animate={{ rotate: 0, scale: 1 }}
+              whileHover={{ scale: 1.05, rotate: 2 }}
+              className="relative group cursor-pointer"
+              onClick={() => setShowAbout(true)}
+              title="D' MASTER PRODUTORA - Clique para saber mais"
             >
-              <div className="w-16 h-16 bg-gradient-to-br from-cyber-blue to-blue-800 rounded-2xl flex items-center justify-center shadow-2xl shadow-blue-950/50 border border-white/30 overflow-hidden">
-                <div className="absolute inset-0 bg-[url('https://www.transparenttextures.com/patterns/carbon-fibre.png')] opacity-20"></div>
-                <Radio className="h-8 w-8 text-white relative z-10" />
+              <div className="w-16 h-16 rounded-2xl overflow-hidden shadow-[0_0_30px_rgba(0,242,255,0.45)] border-2 border-cyber-blue/50 relative bg-black">
+                <img 
+                  src="/src/assets/images/app_radio_icon_1790193192690.jpg" 
+                  alt="Ícone D' MASTER PRODUTORA" 
+                  referrerPolicy="no-referrer"
+                  className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-110"
+                />
               </div>
-              <div className="absolute -bottom-1 -right-1 w-4 h-4 bg-cyber-cyan rounded-full border-2 border-[#020617] animate-pulse shadow-[0_0_10px_rgba(0,212,255,0.5)]"></div>
+              <div className="absolute -bottom-1 -right-1 w-4 h-4 bg-cyber-cyan rounded-full border-2 border-[#020617] animate-pulse shadow-[0_0_10px_rgba(0,212,255,0.8)]"></div>
             </motion.div>
             <div>
               <h1 className="text-5xl font-black tracking-tighter text-white uppercase italic drop-shadow-[0_4px_12px_rgba(0,0,0,0.8)] flex items-center gap-3 font-display">
@@ -681,7 +995,49 @@ const App: React.FC = () => {
             </div>
           </div>
 
-          <div className="flex gap-3">
+          <div className="flex gap-3 flex-wrap">
+            <button 
+              onClick={() => setShowTutorial(true)}
+              className={cn(
+                "px-5 py-3 rounded-2xl border-t border-white/20 flex items-center gap-2.5 transition-all font-black text-xs uppercase tracking-widest shadow-lg",
+                showTutorial 
+                  ? "bg-cyber-blue text-deep-navy shadow-[0_0_30px_rgba(0,242,255,0.6)]" 
+                  : "bg-cyber-blue/20 border-cyber-blue/40 text-cyber-cyan hover:bg-cyber-blue/30 hover:border-cyber-blue"
+              )}
+              title="Manual Completo & Como Usar o Sistema Passo a Passo"
+            >
+              <BookOpen className="h-4 w-4 text-cyber-blue" />
+              <span>Como Usar (Tutorial)</span>
+            </button>
+            <button 
+              onClick={() => setShowEffectsModal(true)}
+              className={cn(
+                "px-5 py-3 rounded-2xl border-t border-white/20 flex items-center gap-2.5 transition-all font-black text-xs uppercase tracking-widest",
+                showEffectsModal 
+                  ? "bg-cyber-blue text-deep-navy shadow-[0_0_30px_rgba(0,242,255,0.4)]" 
+                  : "bg-white/5 border-white/10 text-white/70 hover:bg-white/10 hover:border-white/30"
+              )}
+              title="Mesa de Efeitos Sonoros, Rack DSP e Masterização"
+            >
+              <Sliders className="h-4 w-4 text-cyber-blue" />
+              <span>Efeitos & Master</span>
+              <span className="text-[9px] bg-cyber-blue/20 text-cyber-cyan px-2 py-0.5 rounded-full border border-cyber-blue/30 uppercase font-mono">
+                {AUDIO_EFFECT_PRESETS.find(p => p.id === activeAudioEffect)?.label.split(' ')[0] || 'FX'}
+              </span>
+            </button>
+            <button 
+              onClick={() => setShowApiHelp(true)}
+              className={cn(
+                "px-5 py-3 rounded-2xl border-t border-white/20 flex items-center gap-2.5 transition-all font-black text-xs uppercase tracking-widest",
+                showApiHelp 
+                  ? "bg-cyber-blue text-deep-navy shadow-[0_0_30px_rgba(0,242,255,0.4)]" 
+                  : "bg-white/5 border-white/10 text-white/70 hover:bg-white/10 hover:border-white/30"
+              )}
+              title="Diagnóstico de Conexão e Como Resolver Erro de API Negada"
+            >
+              <Key className="h-4 w-4 text-cyber-blue" />
+              <span>Status da API</span>
+            </button>
             <button 
               onClick={() => setShowAbout(!showAbout)}
               className={cn(
@@ -724,6 +1080,78 @@ const App: React.FC = () => {
             <div className="flex items-center gap-3 px-4 py-2 bg-cyber-blue/10 rounded-full border border-cyber-blue/30">
               <Sparkles className="w-4 h-4 text-cyber-cyan" />
               <span className="text-[10px] font-black text-cyber-cyan uppercase tracking-widest">Motor Quântico Ativo</span>
+            </div>
+          </div>
+
+          {/* Banner de Como Usar em 4 Passos Rápidos */}
+          <div className="mb-10 p-5 md:p-6 bg-gradient-to-r from-blue-950/40 via-slate-900/60 to-blue-950/40 border border-cyber-blue/30 rounded-3xl relative overflow-hidden shadow-[0_0_30px_rgba(0,242,255,0.12)]">
+            <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-4 mb-4 pb-3 border-b border-white/10">
+              <div className="flex items-center gap-3">
+                <div className="w-8 h-8 rounded-xl bg-cyber-blue/20 border border-cyber-blue/40 flex items-center justify-center text-cyber-blue font-black text-xs shadow-[0_0_10px_rgba(0,242,255,0.4)]">
+                  ⚡
+                </div>
+                <div>
+                  <h4 className="text-xs font-black uppercase tracking-[0.2em] text-white flex items-center gap-2">
+                    Como Criar seu Spot em 4 Passos Rápidos
+                    <span className="text-[9px] bg-cyber-blue/20 text-cyber-cyan px-2 py-0.5 rounded-full border border-cyber-blue/30 font-mono">
+                      FLUXO SIMPLES
+                    </span>
+                  </h4>
+                  <p className="text-[11px] text-white/50">
+                    Siga o passo a passo abaixo para criar roteiros persuasivos e áudios com qualidade de rádio profissional.
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowTutorial(true)}
+                className="px-4 py-2 rounded-xl bg-cyber-blue/15 hover:bg-cyber-blue/25 border border-cyber-blue/40 text-cyber-cyan text-[10px] font-black uppercase tracking-wider transition-all flex items-center gap-2 self-end md:self-auto cursor-pointer"
+              >
+                <BookOpen className="w-3.5 h-3.5" />
+                <span>Ver Manual Completo</span>
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+              <div className="p-4 bg-black/40 rounded-2xl border border-white/5 space-y-1.5 hover:border-cyber-blue/30 transition-all">
+                <div className="flex items-center gap-2 text-cyber-blue font-black text-xs uppercase tracking-wider">
+                  <span className="w-5 h-5 rounded-full bg-cyber-blue/20 border border-cyber-blue/40 flex items-center justify-center text-[10px] font-mono">1</span>
+                  <span>Briefing ou Foto</span>
+                </div>
+                <p className="text-[10px] text-white/50 leading-relaxed">
+                  Digite as promoções ou clique no ícone da câmera para enviar a foto do panfleto/encarte.
+                </p>
+              </div>
+
+              <div className="p-4 bg-black/40 rounded-2xl border border-white/5 space-y-1.5 hover:border-cyber-blue/30 transition-all">
+                <div className="flex items-center gap-2 text-cyber-blue font-black text-xs uppercase tracking-wider">
+                  <span className="w-5 h-5 rounded-full bg-cyber-blue/20 border border-cyber-blue/40 flex items-center justify-center text-[10px] font-mono">2</span>
+                  <span>Persona & Estilo</span>
+                </div>
+                <p className="text-[10px] text-white/50 leading-relaxed">
+                  Escolha a voz (ex: Varejão, Dutra Clássico, Caipira), o tempo (ex: 30s) e os efeitos sonoros.
+                </p>
+              </div>
+
+              <div className="p-4 bg-black/40 rounded-2xl border border-white/5 space-y-1.5 hover:border-cyber-blue/30 transition-all">
+                <div className="flex items-center gap-2 text-cyber-blue font-black text-xs uppercase tracking-wider">
+                  <span className="w-5 h-5 rounded-full bg-cyber-blue/20 border border-cyber-blue/40 flex items-center justify-center text-[10px] font-mono">3</span>
+                  <span>Gerar Spot</span>
+                </div>
+                <p className="text-[10px] text-white/50 leading-relaxed">
+                  Clique no botão azul central. A IA escreve o roteiro com gatilhos mentais e sintetiza o áudio.
+                </p>
+              </div>
+
+              <div className="p-4 bg-black/40 rounded-2xl border border-white/5 space-y-1.5 hover:border-cyber-blue/30 transition-all">
+                <div className="flex items-center gap-2 text-cyber-blue font-black text-xs uppercase tracking-wider">
+                  <span className="w-5 h-5 rounded-full bg-cyber-blue/20 border border-cyber-blue/40 flex items-center justify-center text-[10px] font-mono">4</span>
+                  <span>Efeitos & Master</span>
+                </div>
+                <p className="text-[10px] text-white/50 leading-relaxed">
+                  Ouça com o processador DSP (ex: Rádio FM, Grave Titânico) e baixe a Master WAV final.
+                </p>
+              </div>
             </div>
           </div>
           
@@ -991,6 +1419,205 @@ const App: React.FC = () => {
               </div>
             </div>
           </div>
+
+          {/* Painel Central de Opções de Efeitos, Sonoplastia e Masterização DSP */}
+          <div className="mt-10 pt-8 border-t border-white/10 space-y-8">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl bg-cyber-blue/10 border border-cyber-blue/30 flex items-center justify-center text-cyber-blue shadow-[0_0_15px_rgba(0,242,255,0.3)]">
+                  <Sliders className="w-5 h-5" />
+                </div>
+                <div>
+                  <h4 className="text-sm font-black text-white uppercase tracking-[0.2em] font-display flex items-center gap-2">
+                    Rack de Efeitos & Sonoplastia de Estúdio
+                    <span className="text-[9px] bg-cyber-blue/20 text-cyber-blue px-2 py-0.5 rounded-full border border-cyber-blue/30 font-mono">
+                      DSP ENGINE
+                    </span>
+                  </h4>
+                  <p className="text-[11px] text-white/50">
+                    Defina o estilo dos efeitos sonoros (SFX) e o processamento de voz em tempo real.
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-3 self-end sm:self-auto">
+                <button
+                  type="button"
+                  onClick={() => setEffectBypass(!effectBypass)}
+                  className={cn(
+                    "px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest border transition-all flex items-center gap-2",
+                    effectBypass
+                      ? "bg-amber-500/20 border-amber-500/50 text-amber-300"
+                      : "bg-white/5 border-white/10 text-white/40 hover:text-white"
+                  )}
+                  title="Desativar temporariamente todos os efeitos de processamento DSP (Bypass)"
+                >
+                  <VolumeX className="w-3.5 h-3.5" />
+                  <span>Bypass FX: {effectBypass ? 'ATIVO (CLEAN)' : 'DESLIGADO'}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowEffectsModal(true)}
+                  className="px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest bg-cyber-blue/10 border border-cyber-blue/30 text-cyber-blue hover:bg-cyber-blue/20 transition-all flex items-center gap-2"
+                >
+                  <Wand2 className="w-3.5 h-3.5" />
+                  <span>Ajustes Finos</span>
+                </button>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+              {/* 1. Perfil de SFX do Roteiro */}
+              <div className="space-y-4 p-6 bg-white/[0.02] border border-white/5 rounded-3xl">
+                <div className="flex items-center justify-between">
+                  <label className="text-[11px] font-black text-cyber-blue uppercase tracking-[0.2em] flex items-center gap-2">
+                    <Music className="w-4 h-4" /> 1. Perfil de Sonoplastia (SFX Pack)
+                  </label>
+                  <span className="text-[9px] font-mono text-white/30 uppercase">Roteiro Inteligente</span>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                  {SFX_PROFILES.map((profile) => (
+                    <button
+                      key={profile.id}
+                      type="button"
+                      onClick={() => {
+                        setSfxProfile(profile.id);
+                        addLog(`Perfil de SFX selecionado: ${profile.label.toUpperCase()}`, "info");
+                      }}
+                      className={cn(
+                        "p-3.5 rounded-2xl border text-left transition-all flex flex-col justify-between gap-2",
+                        sfxProfile === profile.id
+                          ? "bg-cyber-blue/15 border-cyber-blue text-white shadow-[0_0_20px_rgba(0,242,255,0.2)]"
+                          : "bg-black/40 border-white/5 text-white/50 hover:bg-white/5 hover:text-white/80"
+                      )}
+                    >
+                      <div className="flex items-center gap-2.5">
+                        <span className="text-lg">{profile.icon}</span>
+                        <span className="text-[11px] font-black uppercase tracking-wider text-white">
+                          {profile.label}
+                        </span>
+                      </div>
+                      <p className="text-[10px] text-white/40 line-clamp-2 leading-relaxed">
+                        {profile.description}
+                      </p>
+                      <div className="flex flex-wrap gap-1 mt-1">
+                        {profile.tags.slice(0, 2).map((t) => (
+                          <span
+                            key={t}
+                            className="text-[8px] font-mono font-bold px-1.5 py-0.5 rounded bg-white/5 text-cyber-cyan/80 border border-white/10"
+                          >
+                            #{t}
+                          </span>
+                        ))}
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* 2. Processamento DSP de Voz & Master */}
+              <div className="space-y-4 p-6 bg-white/[0.02] border border-white/5 rounded-3xl">
+                <div className="flex items-center justify-between">
+                  <label className="text-[11px] font-black text-cyber-blue uppercase tracking-[0.2em] flex items-center gap-2">
+                    <Radio className="w-4 h-4" /> 2. Efeito DSP de Voz & Master
+                  </label>
+                  <div className="flex items-center gap-2 text-[10px] font-mono text-white/50">
+                    <span>Intensidade:</span>
+                    <span className="text-cyber-blue font-bold">{effectIntensity}%</span>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                  {AUDIO_EFFECT_PRESETS.map((preset) => (
+                    <button
+                      key={preset.id}
+                      type="button"
+                      onClick={() => {
+                        setActiveAudioEffect(preset.id);
+                        addLog(`Efeito DSP Master alterado para: ${preset.label.toUpperCase()}`, "info");
+                      }}
+                      className={cn(
+                        "p-2.5 rounded-2xl border text-center transition-all flex flex-col items-center justify-center gap-1.5",
+                        activeAudioEffect === preset.id
+                          ? "bg-cyber-blue/20 border-cyber-blue text-white shadow-[0_0_20px_rgba(0,242,255,0.25)]"
+                          : "bg-black/40 border-white/5 text-white/40 hover:bg-white/5 hover:text-white/80"
+                      )}
+                      title={preset.description}
+                    >
+                      <span className="text-lg">{preset.icon}</span>
+                      <span className="text-[9px] font-black uppercase tracking-wider truncate w-full">
+                        {preset.label.replace(/\(.*\)/, '').trim()}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+
+                {/* Slider de Intensidade Wet/Dry */}
+                <div className="pt-3 border-t border-white/5 space-y-2">
+                  <div className="flex justify-between items-center text-[10px] font-black uppercase tracking-widest text-white/40">
+                    <span>Mix do Efeito (Wet / Dry)</span>
+                    <span className="text-cyber-blue font-mono">{effectIntensity}% WET</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="0"
+                    max="100"
+                    value={effectIntensity}
+                    onChange={(e) => setEffectIntensity(Number(e.target.value))}
+                    disabled={effectBypass}
+                    className="w-full h-1.5 bg-white/10 rounded-lg appearance-none cursor-pointer accent-cyber-blue disabled:opacity-30"
+                  />
+                  <div className="flex justify-between text-[8px] font-mono text-white/20">
+                    <span>0% (Áudio Puro)</span>
+                    <span>50% (Equilibrado)</span>
+                    <span>100% (Processamento Máximo)</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* 3. Mesa de Disparo Rápido de Efeitos (Instant SFX Cartwall / Soundboard) */}
+            <div className="p-6 bg-black/40 border border-white/10 rounded-3xl space-y-4">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <div className="flex items-center gap-2.5">
+                  <Disc className="w-4 h-4 text-cyber-blue animate-spin" style={{ animationDuration: '8s' }} />
+                  <span className="text-[11px] font-black text-white uppercase tracking-[0.2em]">
+                    Mesa de Disparo Rápido de Efeitos (Cartwall Instantâneo)
+                  </span>
+                </div>
+                <span className="text-[9px] font-mono text-white/30 uppercase">
+                  Sintetizado via Web Audio API • Clique para testar
+                </span>
+              </div>
+
+              <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-7 gap-2.5">
+                {RADIO_SFX_TRIGGERS.map((sfx) => {
+                  const isTriggered = activeSfxTriggerId === sfx.id;
+                  return (
+                    <button
+                      key={sfx.id}
+                      type="button"
+                      onClick={() => triggerSoundEffect(sfx.play, sfx.id)}
+                      className={cn(
+                        "p-3 rounded-2xl border transition-all flex flex-col items-center justify-center gap-1 group active:scale-95",
+                        isTriggered
+                          ? "bg-cyber-blue text-deep-navy border-cyber-blue shadow-[0_0_25px_rgba(0,242,255,0.8)] scale-105"
+                          : "bg-white/5 border-white/10 text-white/70 hover:bg-white/10 hover:border-cyber-blue/40"
+                      )}
+                      title={`Disparar efeito: ${sfx.name}`}
+                    >
+                      <span className="text-xl group-hover:scale-110 transition-transform">
+                        {sfx.icon}
+                      </span>
+                      <span className="text-[9px] font-black uppercase tracking-wider text-center line-clamp-1">
+                        {sfx.name}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
         </motion.section>
 
     {/* System Logs Console */}
@@ -1141,6 +1768,83 @@ const App: React.FC = () => {
                   </select>
                 </div>
               </div>
+
+              {/* Opções de Efeitos no Console de Configuração */}
+              <div className="mt-8 pt-8 border-t border-white/10 space-y-6">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Sliders className="w-4 h-4 text-cyber-blue" />
+                    <span className="text-[11px] font-black text-white uppercase tracking-[0.2em]">
+                      Processamento de Efeitos Master & Sonoplastia
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setEffectBypass(!effectBypass)}
+                    className={cn(
+                      "px-3 py-1 rounded-xl text-[9px] font-mono uppercase font-bold border transition-all",
+                      effectBypass
+                        ? "bg-amber-500/20 border-amber-500/40 text-amber-300"
+                        : "bg-white/5 border-white/10 text-white/40 hover:text-white"
+                    )}
+                  >
+                    Bypass: {effectBypass ? 'Ativo' : 'Desligado'}
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-black text-cyber-blue uppercase tracking-wider block">
+                      Perfil de Efeitos do Roteiro (SFX)
+                    </label>
+                    <select
+                      value={sfxProfile}
+                      onChange={(e) => setSfxProfile(e.target.value as SfxProfile)}
+                      className="input-3d w-full"
+                    >
+                      {SFX_PROFILES.map(p => (
+                        <option key={p.id} value={p.id} className="bg-black text-white">
+                          {p.icon} {p.label} - {p.description}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-black text-cyber-blue uppercase tracking-wider block">
+                      Preset de Efeito DSP de Voz
+                    </label>
+                    <select
+                      value={activeAudioEffect}
+                      onChange={(e) => setActiveAudioEffect(e.target.value as AudioEffectPreset)}
+                      className="input-3d w-full"
+                    >
+                      {AUDIO_EFFECT_PRESETS.map(preset => (
+                        <option key={preset.id} value={preset.id} className="bg-black text-white">
+                          {preset.icon} {preset.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+
+                <div className="space-y-2">
+                  <div className="flex justify-between text-[10px] font-black uppercase text-white/50 tracking-wider">
+                    <span>Intensidade de Efeito (Wet / Dry):</span>
+                    <span className="text-cyber-blue font-mono">{effectIntensity}%</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="0"
+                    max="100"
+                    value={effectIntensity}
+                    onChange={(e) => setEffectIntensity(Number(e.target.value))}
+                    disabled={effectBypass}
+                    className="w-full h-1.5 bg-white/10 rounded-lg appearance-none cursor-pointer accent-cyber-blue disabled:opacity-30"
+                  />
+                </div>
+              </div>
+
               <div className="mt-8 p-6 bg-white/5 border border-white/10 rounded-3xl relative overflow-hidden group">
                 <div className="absolute top-0 left-0 w-1 h-full bg-cyber-blue opacity-50"></div>
                 <p className="text-[11px] text-white/60 font-medium uppercase tracking-widest leading-relaxed italic">
@@ -1177,8 +1881,18 @@ const App: React.FC = () => {
             >
               <div className="flex justify-between items-center mb-8">
                 <div className="flex items-center gap-4">
-                  <div className="w-3 h-3 bg-cyber-blue rounded-full shadow-[0_0_15px_rgba(0,242,255,0.8)]"></div>
-                  <h2 className="text-xl md:text-2xl font-black text-white uppercase tracking-widest font-display italic">Manual Tático D' MASTER</h2>
+                  <div className="w-12 h-12 rounded-2xl overflow-hidden border border-cyber-blue/40 shadow-[0_0_20px_rgba(0,242,255,0.4)] shrink-0 bg-black">
+                    <img 
+                      src="/src/assets/images/app_radio_icon_1790193192690.jpg" 
+                      alt="Ícone do Aplicativo" 
+                      referrerPolicy="no-referrer"
+                      className="w-full h-full object-cover"
+                    />
+                  </div>
+                  <div>
+                    <h2 className="text-xl md:text-2xl font-black text-white uppercase tracking-widest font-display italic">Manual Tático D' MASTER</h2>
+                    <p className="text-[10px] text-cyber-blue font-mono uppercase tracking-widest">Identidade Visual & Diretrizes do Sistema</p>
+                  </div>
                 </div>
                 <div className="flex items-center gap-3">
                   <button onClick={() => setShowAbout(false)} className="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center hover:bg-white/10 transition-colors border border-white/10">
@@ -1390,15 +2104,34 @@ const App: React.FC = () => {
                       className="space-y-8"
                     >
                       <div className="p-8 bg-cyber-blue/10 border border-cyber-blue/30 rounded-[2.5rem] relative overflow-hidden">
-                        <div className="absolute top-0 right-0 p-6 opacity-10">
-                          <Radio className="w-32 h-32 text-cyber-blue" />
+                        <div className="flex flex-col sm:flex-row items-center gap-6 mb-6 relative z-10">
+                          <div className="relative group shrink-0">
+                            <div className="w-24 h-24 rounded-3xl overflow-hidden border-2 border-cyber-blue/50 shadow-[0_0_35px_rgba(0,242,255,0.45)] bg-black">
+                              <img 
+                                src="/src/assets/images/app_radio_icon_1790193192690.jpg" 
+                                alt="Ícone Oficial D' MASTER PRODUTORA" 
+                                referrerPolicy="no-referrer"
+                                className="w-full h-full object-cover group-hover:scale-105 transition-transform"
+                              />
+                            </div>
+                            <a 
+                              href="/src/assets/images/app_radio_icon_1790193192690.jpg" 
+                              download="icone_dmaster_produtora.jpg"
+                              className="absolute -bottom-2 -right-2 p-2 bg-cyber-blue text-deep-navy rounded-xl shadow-lg border border-white/20 hover:scale-110 transition-transform"
+                              title="Baixar Ícone Oficial em Alta Resolução"
+                            >
+                              <Download className="w-3.5 h-3.5" />
+                            </a>
+                          </div>
+                          <div>
+                            <h3 className="text-cyber-blue font-black text-xs uppercase tracking-widest mb-2 flex items-center gap-2">
+                              <Gem className="w-4 h-4" /> Identidade Visual & Motor Exclusivo
+                            </h3>
+                            <p className="text-sm md:text-base text-white/90 leading-relaxed font-medium italic">
+                              O "DNA D' MASTER PRODUTORA" combina inteligência de roteirização neural com estética futurista de broadcast. O ícone oficial sintetiza o microfone clássico de estúdio com ondas sonoras quânticas.
+                            </p>
+                          </div>
                         </div>
-                        <h3 className="text-cyber-blue font-black text-xs uppercase tracking-widest mb-4 flex items-center gap-2">
-                          <Gem className="w-4 h-4" /> Diferencial Exclusivo
-                        </h3>
-                        <p className="text-lg text-white/90 leading-relaxed font-medium italic mb-6 relative z-10">
-                          O "DNA D' MASTER PRODUTORA" não é apenas um gerador de texto. É um motor que entende a alma do rádio brasileiro, gírias técnicas e oferece uma interpretação humana com variações de timbre e ritmo.
-                        </p>
                         <div className="grid grid-cols-1 md:grid-cols-3 gap-4 relative z-10">
                           <div className="p-4 bg-black/40 rounded-2xl border border-white/5">
                             <span className="block text-[10px] font-black text-cyber-blue uppercase mb-2">Fluxo Premium</span>
@@ -1497,13 +2230,27 @@ const App: React.FC = () => {
                     )}
                   </button>
                   {generatedAudio && (
-                    <button 
-                      onClick={downloadAudio}
-                      className="btn-3d-glass !py-4 !px-8 flex items-center gap-3"
-                    >
-                      <Download className="h-6 w-6" />
-                      <span className="uppercase tracking-[0.2em] text-sm">Exportar WAV</span>
-                    </button>
+                    <div className="flex gap-2">
+                      <button 
+                        onClick={() => downloadAudio(true)}
+                        disabled={exportingWav}
+                        className="btn-3d-blue !py-4 !px-6 flex items-center gap-3"
+                        title="Exportar Master em alta fidelidade WAV com a cadeia de efeitos DSP aplicada"
+                      >
+                        <Download className={cn("h-5 w-5", exportingWav && "animate-bounce")} />
+                        <span className="uppercase tracking-[0.2em] text-xs font-black">
+                          {exportingWav ? 'Processando...' : 'Exportar Master (FX)'}
+                        </span>
+                      </button>
+                      <button 
+                        onClick={() => downloadAudio(false)}
+                        className="btn-3d-glass !py-4 !px-4 flex items-center gap-2 text-white/70 hover:text-white"
+                        title="Exportar áudio limpo de estúdio sem processamento (Clean WAV)"
+                      >
+                        <Volume2 className="h-4 w-4 text-cyber-blue" />
+                        <span className="uppercase tracking-[0.2em] text-[10px] font-black">WAV Clean</span>
+                      </button>
+                    </div>
                   )}
                   <button 
                     onClick={exportScript}
@@ -1512,6 +2259,162 @@ const App: React.FC = () => {
                     <FileText className="h-6 w-6" />
                     <span className="uppercase tracking-[0.2em] text-sm">Copiar Roteiro</span>
                   </button>
+                </div>
+              </div>
+
+              {/* Rack de Masterização & Efeitos DSP do Spot */}
+              <div className="p-6 md:p-8 bg-black/40 border-b border-white/10 space-y-6">
+                <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+                  <div className="flex items-center gap-3">
+                    <div className="w-9 h-9 rounded-xl bg-cyber-blue/10 border border-cyber-blue/30 flex items-center justify-center text-cyber-blue">
+                      <Sliders className="w-4 h-4" />
+                    </div>
+                    <div>
+                      <h4 className="text-xs font-black uppercase tracking-[0.2em] text-white flex items-center gap-2">
+                        Rack de Efeitos DSP do Spot
+                        <span className="text-[9px] font-mono px-2 py-0.5 rounded-full bg-cyber-blue/20 text-cyber-blue border border-cyber-blue/30">
+                          {effectBypass ? 'BYPASS (DESLIGADO)' : AUDIO_EFFECT_PRESETS.find(p => p.id === activeAudioEffect)?.label}
+                        </span>
+                      </h4>
+                      <p className="text-[10px] text-white/40">
+                        {AUDIO_EFFECT_PRESETS.find(p => p.id === activeAudioEffect)?.description}
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* Controles de Bypass e Intensidade */}
+                  <div className="flex flex-wrap items-center gap-4">
+                    <button
+                      type="button"
+                      onClick={() => setEffectBypass(!effectBypass)}
+                      className={cn(
+                        "px-3.5 py-2 rounded-xl text-[10px] font-black uppercase tracking-wider border transition-all flex items-center gap-2",
+                        effectBypass
+                          ? "bg-amber-500/20 border-amber-500/50 text-amber-300"
+                          : "bg-white/5 border-white/10 text-white/50 hover:text-white"
+                      )}
+                    >
+                      <VolumeX className="w-3.5 h-3.5" />
+                      <span>Bypass: {effectBypass ? 'LIGADO (SEM EFEITOS)' : 'DESLIGADO'}</span>
+                    </button>
+
+                    <div className="flex items-center gap-3 bg-white/5 px-4 py-2 rounded-xl border border-white/10">
+                      <span className="text-[10px] font-black uppercase text-white/40 tracking-wider">Mix Wet/Dry:</span>
+                      <input
+                        type="range"
+                        min="0"
+                        max="100"
+                        value={effectIntensity}
+                        onChange={(e) => setEffectIntensity(Number(e.target.value))}
+                        disabled={effectBypass}
+                        className="w-24 h-1.5 bg-white/10 rounded-lg appearance-none cursor-pointer accent-cyber-blue disabled:opacity-30"
+                      />
+                      <span className="text-xs font-mono font-bold text-cyber-blue">{effectIntensity}%</span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Seletor Rápido de Presets DSP */}
+                <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-2">
+                  {AUDIO_EFFECT_PRESETS.map((preset) => (
+                    <button
+                      key={preset.id}
+                      type="button"
+                      onClick={() => {
+                        setActiveAudioEffect(preset.id);
+                        addLog(`Efeito do player alterado para: ${preset.label.toUpperCase()}`, "info");
+                      }}
+                      className={cn(
+                        "p-2.5 rounded-xl border text-center transition-all flex flex-col items-center justify-center gap-1",
+                        activeAudioEffect === preset.id
+                          ? "bg-cyber-blue/20 border-cyber-blue text-white shadow-[0_0_15px_rgba(0,242,255,0.3)]"
+                          : "bg-black/50 border-white/5 text-white/40 hover:bg-white/5 hover:text-white/80"
+                      )}
+                    >
+                      <span className="text-base">{preset.icon}</span>
+                      <span className="text-[8px] font-black uppercase tracking-wider truncate w-full">
+                        {preset.label.replace(/\(.*\)/, '').trim()}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+
+                {/* Equalizador de Master de 3 Bandas */}
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3 pt-2 border-t border-white/5">
+                  <div className="flex items-center justify-between bg-black/30 px-3.5 py-2 rounded-xl border border-white/5">
+                    <span className="text-[9px] font-black uppercase tracking-wider text-white/40">Grave (120Hz)</span>
+                    <input
+                      type="range"
+                      min="-12"
+                      max="12"
+                      step="0.5"
+                      value={eqSettings.bass}
+                      onChange={(e) => setEqSettings(s => ({ ...s, bass: Number(e.target.value) }))}
+                      className="w-24 h-1 bg-white/10 rounded accent-cyber-blue"
+                    />
+                    <span className="text-[10px] font-mono text-cyber-blue font-bold w-12 text-right">
+                      {eqSettings.bass > 0 ? `+${eqSettings.bass}` : eqSettings.bass}dB
+                    </span>
+                  </div>
+
+                  <div className="flex items-center justify-between bg-black/30 px-3.5 py-2 rounded-xl border border-white/5">
+                    <span className="text-[9px] font-black uppercase tracking-wider text-white/40">Médio (1.5kHz)</span>
+                    <input
+                      type="range"
+                      min="-12"
+                      max="12"
+                      step="0.5"
+                      value={eqSettings.mid}
+                      onChange={(e) => setEqSettings(s => ({ ...s, mid: Number(e.target.value) }))}
+                      className="w-24 h-1 bg-white/10 rounded accent-cyber-blue"
+                    />
+                    <span className="text-[10px] font-mono text-cyber-blue font-bold w-12 text-right">
+                      {eqSettings.mid > 0 ? `+${eqSettings.mid}` : eqSettings.mid}dB
+                    </span>
+                  </div>
+
+                  <div className="flex items-center justify-between bg-black/30 px-3.5 py-2 rounded-xl border border-white/5">
+                    <span className="text-[9px] font-black uppercase tracking-wider text-white/40">Agudo (8kHz)</span>
+                    <input
+                      type="range"
+                      min="-12"
+                      max="12"
+                      step="0.5"
+                      value={eqSettings.treble}
+                      onChange={(e) => setEqSettings(s => ({ ...s, treble: Number(e.target.value) }))}
+                      className="w-24 h-1 bg-white/10 rounded accent-cyber-blue"
+                    />
+                    <span className="text-[10px] font-mono text-cyber-blue font-bold w-12 text-right">
+                      {eqSettings.treble > 0 ? `+${eqSettings.treble}` : eqSettings.treble}dB
+                    </span>
+                  </div>
+                </div>
+
+                {/* Cartwall de Efeitos Rápidos no Player */}
+                <div className="flex items-center gap-2 pt-2 overflow-x-auto custom-scrollbar pb-1">
+                  <span className="text-[9px] font-black uppercase tracking-widest text-white/30 shrink-0 mr-2 flex items-center gap-1.5">
+                    <Activity className="w-3 h-3 text-cyber-blue" /> Disparos SFX:
+                  </span>
+                  {RADIO_SFX_TRIGGERS.map((sfx) => {
+                    const isTriggered = activeSfxTriggerId === sfx.id;
+                    return (
+                      <button
+                        key={sfx.id}
+                        type="button"
+                        onClick={() => triggerSoundEffect(sfx.play, sfx.id)}
+                        className={cn(
+                          "px-3 py-1.5 rounded-xl border text-[9px] font-black uppercase tracking-wider transition-all flex items-center gap-1.5 shrink-0 active:scale-95",
+                          isTriggered
+                            ? "bg-cyber-blue text-deep-navy border-cyber-blue shadow-[0_0_15px_rgba(0,242,255,0.7)]"
+                            : "bg-white/5 border-white/10 text-white/60 hover:text-white hover:bg-white/10"
+                        )}
+                        title={`Tocar efeito ${sfx.name}`}
+                      >
+                        <span>{sfx.icon}</span>
+                        <span>{sfx.name}</span>
+                      </button>
+                    );
+                  })}
                 </div>
               </div>
 
@@ -1562,6 +2465,850 @@ const App: React.FC = () => {
           </div>
         )}
 
+        {/* API Diagnostics & Resolution Modal */}
+        {showApiHelp && (
+          <div className="fixed inset-0 bg-black/95 backdrop-blur-2xl z-[150] flex items-center justify-center p-4 md:p-6 overflow-y-auto">
+            <motion.div 
+              initial={{ scale: 0.9, opacity: 0, y: 20 }}
+              animate={{ scale: 1, opacity: 1, y: 0 }}
+              className="glass-3d rounded-[2.5rem] md:rounded-[3.5rem] p-6 md:p-10 max-w-3xl w-full border-t border-white/20 my-auto"
+            >
+              <div className="flex justify-between items-center mb-8 pb-6 border-b border-white/10">
+                <div className="flex items-center gap-4">
+                  <div className="w-12 h-12 rounded-2xl bg-cyber-blue/10 border border-cyber-blue/30 flex items-center justify-center text-cyber-blue shadow-[0_0_20px_rgba(0,242,255,0.3)]">
+                    <Key className="w-6 h-6" />
+                  </div>
+                  <div>
+                    <h2 className="text-xl md:text-2xl font-black text-white uppercase tracking-widest font-display italic">
+                      Diagnóstico da API Gemini
+                    </h2>
+                    <p className="text-[11px] font-mono text-cyber-blue uppercase tracking-widest">
+                      Como resolver erro de API Negada (403 / Permissão)
+                    </p>
+                  </div>
+                </div>
+                <button 
+                  onClick={() => setShowApiHelp(false)} 
+                  className="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center hover:bg-white/10 transition-colors border border-white/10 text-white/60 hover:text-white"
+                >
+                  <X className="h-5 w-5" />
+                </button>
+              </div>
+
+              {/* Real-time Status Card */}
+              <div className="mb-8 p-6 bg-white/5 border border-white/10 rounded-3xl space-y-4">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                  <div className="flex items-center gap-3">
+                    <div className={cn(
+                      "w-3 h-3 rounded-full animate-pulse",
+                      getApiKey() ? "bg-emerald-400 shadow-[0_0_12px_rgba(52,211,153,0.8)]" : "bg-red-400 shadow-[0_0_12px_rgba(248,113,113,0.8)]"
+                    )}></div>
+                    <span className="text-xs font-black uppercase tracking-widest text-white">
+                      Status da Variável GEMINI_API_KEY:
+                    </span>
+                    <span className={cn(
+                      "text-xs font-mono font-bold px-3 py-1 rounded-full",
+                      getApiKey() ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30" : "bg-red-500/20 text-red-300 border border-red-500/30"
+                    )}>
+                      {getApiKey() ? `Presente (${getApiKey().substring(0, 6)}...${getApiKey().slice(-4)})` : 'Não Detectada'}
+                    </span>
+                  </div>
+                  <button
+                    onClick={testApiConnection}
+                    disabled={testingApi}
+                    className="btn-3d-blue !py-2.5 !px-5 text-xs flex items-center justify-center gap-2 self-start sm:self-auto disabled:opacity-50"
+                  >
+                    {testingApi ? (
+                      <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin"></div>
+                    ) : (
+                      <RotateCcw className="w-3.5 h-3.5" />
+                    )}
+                    <span>{testingApi ? 'Testando...' : 'Testar Conexão'}</span>
+                  </button>
+                </div>
+
+                {testResult && (
+                  <motion.div 
+                    initial={{ opacity: 0, y: -10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    className={cn(
+                      "p-4 rounded-2xl text-xs font-mono border",
+                      testResult.success 
+                        ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-300" 
+                        : "bg-red-500/10 border-red-500/30 text-red-300"
+                    )}
+                  >
+                    <div className="flex items-start gap-2.5">
+                      {testResult.success ? (
+                        <CheckCircle2 className="w-4 h-4 mt-0.5 shrink-0 text-emerald-400" />
+                      ) : (
+                        <ShieldAlert className="w-4 h-4 mt-0.5 shrink-0 text-red-400" />
+                      )}
+                      <span>{testResult.message}</span>
+                    </div>
+                  </motion.div>
+                )}
+              </div>
+
+              {/* Step-by-Step Resolution Guide */}
+              <div className="space-y-4 max-h-[420px] overflow-y-auto pr-2 custom-scrollbar">
+                <h3 className="text-xs font-black uppercase tracking-[0.2em] text-white/60 mb-2">
+                  Passo a Passo para Desbloquear a API
+                </h3>
+
+                <div className="p-5 rounded-2xl bg-white/[0.03] border border-white/10 hover:border-white/20 transition-all">
+                  <div className="flex items-center gap-3 mb-2">
+                    <span className="w-6 h-6 rounded-full bg-cyber-blue text-deep-navy font-black text-xs flex items-center justify-center">1</span>
+                    <h4 className="text-sm font-bold text-white uppercase tracking-wider">Ativar a Generative Language API no Google Cloud</h4>
+                  </div>
+                  <p className="text-xs text-white/70 leading-relaxed pl-9">
+                    No Google Cloud Console, toda chave de API precisa que a <strong className="text-white">Generative Language API</strong> esteja ativada no projeto. Se estiver desativada, qualquer chamada é bloqueada com <code className="text-cyber-cyan bg-white/5 px-1 py-0.5 rounded">403 PERMISSION_DENIED</code>.
+                  </p>
+                </div>
+
+                <div className="p-5 rounded-2xl bg-white/[0.03] border border-white/10 hover:border-white/20 transition-all">
+                  <div className="flex items-center gap-3 mb-2">
+                    <span className="w-6 h-6 rounded-full bg-cyber-blue text-deep-navy font-black text-xs flex items-center justify-center">2</span>
+                    <h4 className="text-sm font-bold text-white uppercase tracking-wider">Verificar Restrições da Chave (Credentials)</h4>
+                  </div>
+                  <p className="text-xs text-white/70 leading-relaxed pl-9">
+                    No painel de Credenciais do Google Cloud: se a chave tiver <strong className="text-white">Restrições de API</strong>, verifique se a Generative Language API está permitida. Se tiver <strong className="text-white">Restrições de Aplicativo (HTTP Referrers / IP)</strong>, remova temporariamente para testar se a restrição é a causa do bloqueio.
+                  </p>
+                </div>
+
+                <div className="p-5 rounded-2xl bg-white/[0.03] border border-cyber-blue/30 bg-cyber-blue/5 transition-all">
+                  <div className="flex items-center gap-3 mb-2">
+                    <span className="w-6 h-6 rounded-full bg-cyber-blue text-deep-navy font-black text-xs flex items-center justify-center">3</span>
+                    <h4 className="text-sm font-bold text-cyber-blue uppercase tracking-wider">Criar Chave Direta no Google AI Studio (Mais Fácil)</h4>
+                  </div>
+                  <p className="text-xs text-white/70 leading-relaxed pl-9">
+                    A forma mais rápida e garantida de evitar conflitos de permissão é gerar uma chave limpa direto no <strong className="text-white">Google AI Studio</strong> (aistudio.google.com/apikey) clicando em <em className="text-cyber-cyan">Create API key</em>. Essas chaves vêm pré-configuradas e prontas para uso.
+                  </p>
+                </div>
+
+                <div className="p-5 rounded-2xl bg-white/[0.03] border border-white/10 hover:border-white/20 transition-all">
+                  <div className="flex items-center gap-3 mb-2">
+                    <span className="w-6 h-6 rounded-full bg-cyber-blue text-deep-navy font-black text-xs flex items-center justify-center">4</span>
+                    <h4 className="text-sm font-bold text-white uppercase tracking-wider">Configurar a Variável no .env</h4>
+                  </div>
+                  <p className="text-xs text-white/70 leading-relaxed pl-9">
+                    Insira a chave no arquivo <code className="text-cyber-cyan bg-white/5 px-1 py-0.5 rounded">.env</code> na raiz do projeto:
+                  </p>
+                  <pre className="mt-2 ml-9 p-3 bg-black/60 rounded-xl text-[11px] font-mono text-emerald-400 border border-white/10 overflow-x-auto">
+GEMINI_API_KEY=AIzaSySuaChaveAquiSemEspacos
+                  </pre>
+                </div>
+              </div>
+
+              <div className="mt-8 pt-6 border-t border-white/10 flex justify-end">
+                <button
+                  onClick={() => setShowApiHelp(false)}
+                  className="btn-3d-glass !py-3 !px-8 text-xs uppercase tracking-widest font-black"
+                >
+                  Entendido / Fechar
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+
+        {/* Modal de Efeitos Sonoros, Sonoplastia e Masterização DSP */}
+        {showEffectsModal && (
+          <div className="fixed inset-0 bg-black/95 backdrop-blur-2xl z-[150] flex items-center justify-center p-4 md:p-6 overflow-y-auto">
+            <motion.div 
+              initial={{ scale: 0.9, opacity: 0, y: 20 }}
+              animate={{ scale: 1, opacity: 1, y: 0 }}
+              className="glass-3d rounded-[2.5rem] md:rounded-[3.5rem] p-6 md:p-10 max-w-4xl w-full border-t border-white/20 my-auto space-y-8"
+            >
+              {/* Header do Modal */}
+              <div className="flex justify-between items-center pb-6 border-b border-white/10">
+                <div className="flex items-center gap-4">
+                  <div className="w-12 h-12 rounded-2xl bg-cyber-blue/10 border border-cyber-blue/30 flex items-center justify-center text-cyber-blue shadow-[0_0_20px_rgba(0,242,255,0.3)]">
+                    <Sliders className="w-6 h-6" />
+                  </div>
+                  <div>
+                    <h2 className="text-xl md:text-2xl font-black text-white uppercase tracking-widest font-display italic">
+                      Mesa de Efeitos Sonoros & Master DSP
+                    </h2>
+                    <p className="text-[11px] font-mono text-cyber-blue uppercase tracking-widest">
+                      Processamento de Áudio Broadcast, Equalização e Disparo Instantâneo
+                    </p>
+                  </div>
+                </div>
+                <button 
+                  onClick={() => setShowEffectsModal(false)} 
+                  className="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center hover:bg-white/10 transition-colors border border-white/10 text-white/60 hover:text-white"
+                >
+                  <X className="h-5 w-5" />
+                </button>
+              </div>
+
+              {/* 1. Presets de Efeitos de Voz & Master */}
+              <div className="space-y-4">
+                <div className="flex justify-between items-center">
+                  <label className="text-xs font-black uppercase tracking-[0.2em] text-white flex items-center gap-2">
+                    <Radio className="w-4 h-4 text-cyber-blue" /> Presets de Processamento DSP de Voz
+                  </label>
+                  <div className="flex items-center gap-3">
+                    <button
+                      type="button"
+                      onClick={() => setEffectBypass(!effectBypass)}
+                      className={cn(
+                        "px-3 py-1 rounded-xl text-[10px] font-mono font-bold uppercase border transition-all",
+                        effectBypass
+                          ? "bg-amber-500/20 border-amber-500/40 text-amber-300"
+                          : "bg-white/5 border-white/10 text-white/40 hover:text-white"
+                      )}
+                    >
+                      Bypass: {effectBypass ? 'ATIVADO' : 'DESATIVADO'}
+                    </button>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3">
+                  {AUDIO_EFFECT_PRESETS.map((preset) => (
+                    <button
+                      key={preset.id}
+                      type="button"
+                      onClick={() => {
+                        setActiveAudioEffect(preset.id);
+                        addLog(`Preset de efeito selecionado: ${preset.label.toUpperCase()}`, "info");
+                      }}
+                      className={cn(
+                        "p-4 rounded-2xl border text-left transition-all flex flex-col justify-between gap-2 group",
+                        activeAudioEffect === preset.id
+                          ? "bg-cyber-blue/15 border-cyber-blue text-white shadow-[0_0_20px_rgba(0,242,255,0.25)]"
+                          : "bg-white/5 border-white/5 text-white/60 hover:bg-white/10 hover:text-white"
+                      )}
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className="text-2xl group-hover:scale-110 transition-transform">{preset.icon}</span>
+                        {activeAudioEffect === preset.id && (
+                          <span className="w-2 h-2 rounded-full bg-cyber-blue animate-ping"></span>
+                        )}
+                      </div>
+                      <div>
+                        <div className="text-xs font-black uppercase tracking-wider text-white">
+                          {preset.label}
+                        </div>
+                        <div className="text-[10px] text-white/40 mt-1 line-clamp-2 leading-relaxed">
+                          {preset.description}
+                        </div>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* 2. Equalizador de Master & Slider de Wet/Dry */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6 p-6 bg-white/[0.02] border border-white/10 rounded-3xl">
+                {/* Wet/Dry Mix */}
+                <div className="space-y-4">
+                  <div className="flex justify-between items-center">
+                    <span className="text-xs font-black uppercase tracking-wider text-white/70">
+                      Mix de Intensidade (Wet / Dry)
+                    </span>
+                    <span className="text-xs font-mono font-bold text-cyber-blue">
+                      {effectIntensity}% Processado
+                    </span>
+                  </div>
+                  <input
+                    type="range"
+                    min="0"
+                    max="100"
+                    value={effectIntensity}
+                    onChange={(e) => setEffectIntensity(Number(e.target.value))}
+                    disabled={effectBypass}
+                    className="w-full h-2 bg-white/10 rounded-lg appearance-none cursor-pointer accent-cyber-blue disabled:opacity-30"
+                  />
+                  <p className="text-[10px] text-white/40 leading-relaxed">
+                    Controla a proporção entre o sinal puro do locutor (Dry) e a reverberação/compressão broadcast (Wet).
+                  </p>
+                </div>
+
+                {/* Equalizador 3 Bandas */}
+                <div className="space-y-3">
+                  <div className="flex justify-between items-center">
+                    <span className="text-xs font-black uppercase tracking-wider text-white/70">
+                      Equalizador Master (EQ 3 Bandas)
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setEqSettings({ bass: 2.5, mid: 1.5, treble: 2.0 })}
+                      className="text-[9px] font-mono text-cyber-blue hover:underline"
+                    >
+                      Restaurar Padrão FM
+                    </button>
+                  </div>
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between text-[10px] font-mono">
+                      <span className="text-white/40">Grave (120Hz):</span>
+                      <input
+                        type="range"
+                        min="-12"
+                        max="12"
+                        step="0.5"
+                        value={eqSettings.bass}
+                        onChange={(e) => setEqSettings(s => ({ ...s, bass: Number(e.target.value) }))}
+                        className="w-32 h-1 bg-white/10 rounded accent-cyber-blue"
+                      />
+                      <span className="text-cyber-blue font-bold w-12 text-right">
+                        {eqSettings.bass > 0 ? `+${eqSettings.bass}` : eqSettings.bass}dB
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between text-[10px] font-mono">
+                      <span className="text-white/40">Médio (1.5kHz):</span>
+                      <input
+                        type="range"
+                        min="-12"
+                        max="12"
+                        step="0.5"
+                        value={eqSettings.mid}
+                        onChange={(e) => setEqSettings(s => ({ ...s, mid: Number(e.target.value) }))}
+                        className="w-32 h-1 bg-white/10 rounded accent-cyber-blue"
+                      />
+                      <span className="text-cyber-blue font-bold w-12 text-right">
+                        {eqSettings.mid > 0 ? `+${eqSettings.mid}` : eqSettings.mid}dB
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between text-[10px] font-mono">
+                      <span className="text-white/40">Agudo (8kHz):</span>
+                      <input
+                        type="range"
+                        min="-12"
+                        max="12"
+                        step="0.5"
+                        value={eqSettings.treble}
+                        onChange={(e) => setEqSettings(s => ({ ...s, treble: Number(e.target.value) }))}
+                        className="w-32 h-1 bg-white/10 rounded accent-cyber-blue"
+                      />
+                      <span className="text-cyber-blue font-bold w-12 text-right">
+                        {eqSettings.treble > 0 ? `+${eqSettings.treble}` : eqSettings.treble}dB
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* 3. Disparador de Cartwall Instantâneo */}
+              <div className="space-y-3">
+                <div className="flex justify-between items-center">
+                  <label className="text-xs font-black uppercase tracking-[0.2em] text-white flex items-center gap-2">
+                    <Disc className="w-4 h-4 text-cyber-blue" /> Disparo de Efeitos Instantâneos (Cartwall)
+                  </label>
+                  <span className="text-[10px] font-mono text-white/30">Testar áudio dos efeitos</span>
+                </div>
+                <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-7 gap-2.5">
+                  {RADIO_SFX_TRIGGERS.map((sfx) => {
+                    const isTriggered = activeSfxTriggerId === sfx.id;
+                    return (
+                      <button
+                        key={sfx.id}
+                        type="button"
+                        onClick={() => triggerSoundEffect(sfx.play, sfx.id)}
+                        className={cn(
+                          "p-3 rounded-2xl border transition-all flex flex-col items-center justify-center gap-1 group active:scale-95",
+                          isTriggered
+                            ? "bg-cyber-blue text-deep-navy border-cyber-blue shadow-[0_0_25px_rgba(0,242,255,0.8)] scale-105"
+                            : "bg-white/5 border-white/10 text-white/70 hover:bg-white/10 hover:border-cyber-blue/40"
+                        )}
+                      >
+                        <span className="text-xl group-hover:scale-110 transition-transform">
+                          {sfx.icon}
+                        </span>
+                        <span className="text-[9px] font-black uppercase tracking-wider text-center line-clamp-1">
+                          {sfx.name}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Botões do Rodapé */}
+              <div className="pt-6 border-t border-white/10 flex justify-between items-center">
+                <span className="text-[11px] text-white/40 font-mono">
+                  Efeito ativo: <strong className="text-cyber-blue">{AUDIO_EFFECT_PRESETS.find(p => p.id === activeAudioEffect)?.label}</strong>
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setShowEffectsModal(false)}
+                  className="btn-3d-blue !py-3 !px-8 text-xs uppercase tracking-widest font-black"
+                >
+                  Concluir & Aplicar
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+
+        {/* Modal de Tutorial & Guia Passo a Passo Completo */}
+        {showTutorial && (
+          <div className="fixed inset-0 bg-black/95 backdrop-blur-2xl z-[160] flex items-center justify-center p-4 md:p-6 overflow-y-auto">
+            <motion.div 
+              initial={{ scale: 0.9, opacity: 0, y: 20 }}
+              animate={{ scale: 1, opacity: 1, y: 0 }}
+              className="glass-3d rounded-[2.5rem] md:rounded-[3.5rem] p-6 md:p-10 max-w-5xl w-full border-t border-white/20 my-auto space-y-6 max-h-[92vh] flex flex-col"
+            >
+              {/* Header do Tutorial */}
+              <div className="flex justify-between items-center pb-6 border-b border-white/10 shrink-0">
+                <div className="flex items-center gap-4">
+                  <div className="w-12 h-12 rounded-2xl bg-cyber-blue/15 border border-cyber-blue/40 flex items-center justify-center text-cyber-blue shadow-[0_0_20px_rgba(0,242,255,0.4)]">
+                    <BookOpen className="w-6 h-6" />
+                  </div>
+                  <div>
+                    <h2 className="text-xl md:text-2xl font-black text-white uppercase tracking-widest font-display italic">
+                      Manual Completo: Como Usar a Produtora
+                    </h2>
+                    <p className="text-[11px] font-mono text-cyber-blue uppercase tracking-widest">
+                      Guia Detalhado de Cada Função • Do Briefing à Master WAV de Rádio
+                    </p>
+                  </div>
+                </div>
+                <button 
+                  onClick={() => setShowTutorial(false)} 
+                  className="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center hover:bg-white/10 transition-colors border border-white/10 text-white/60 hover:text-white"
+                >
+                  <X className="h-5 w-5" />
+                </button>
+              </div>
+
+              {/* Abas de Navegação do Tutorial */}
+              <div className="flex gap-2 overflow-x-auto custom-scrollbar pb-1 shrink-0">
+                {[
+                  { id: 'quickstart', label: '1. Passo a Passo Rápido', icon: '🚀' },
+                  { id: 'personas', label: '2. Locutores & Personas', icon: '🎙️' },
+                  { id: 'effects', label: '3. Efeitos Sonoros & Master DSP', icon: '🎛️' },
+                  { id: 'image', label: '4. Leitura de Panfletos (IA)', icon: '🖼️' },
+                  { id: 'faq', label: '5. Dicas de Ouro & FAQ', icon: '💡' },
+                ].map((tab) => (
+                  <button
+                    key={tab.id}
+                    onClick={() => setTutorialTab(tab.id as any)}
+                    className={cn(
+                      "px-4 py-2.5 rounded-2xl border text-xs font-black uppercase tracking-wider transition-all flex items-center gap-2 shrink-0",
+                      tutorialTab === tab.id
+                        ? "bg-cyber-blue text-deep-navy border-cyber-blue shadow-[0_0_20px_rgba(0,242,255,0.4)]"
+                        : "bg-white/5 border-white/10 text-white/60 hover:bg-white/10 hover:text-white"
+                    )}
+                  >
+                    <span>{tab.icon}</span>
+                    <span>{tab.label}</span>
+                  </button>
+                ))}
+              </div>
+
+              {/* Conteúdo Dinâmico das Abas */}
+              <div className="overflow-y-auto custom-scrollbar pr-2 space-y-6 flex-1 text-white/80">
+                {/* ABA 1: PASSO A PASSO RÁPIDO */}
+                {tutorialTab === 'quickstart' && (
+                  <div className="space-y-6">
+                    <div className="p-4 rounded-2xl bg-cyber-blue/10 border border-cyber-blue/30 text-cyber-cyan text-xs leading-relaxed flex items-center gap-3">
+                      <Sparkles className="w-5 h-5 shrink-0 text-cyber-blue" />
+                      <span>
+                        <strong>Visão Geral:</strong> O sistema cria roteiros com persuasão comercial avançada e gera a locução sintetizada em áudio de alta fidelidade com efeitos sonoros e processamento master broadcast.
+                      </span>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      {/* Passo 1 */}
+                      <div className="p-6 bg-white/[0.03] border border-white/10 rounded-3xl space-y-3">
+                        <div className="flex items-center gap-3">
+                          <span className="w-8 h-8 rounded-xl bg-cyber-blue/20 border border-cyber-blue/40 text-cyber-blue flex items-center justify-center font-black text-sm">1</span>
+                          <h4 className="text-sm font-black text-white uppercase tracking-wider">
+                            Insira o Tema ou Suba a Foto
+                          </h4>
+                        </div>
+                        <p className="text-xs text-white/60 leading-relaxed">
+                          No campo principal <strong>"Briefing Criativo da Campanha"</strong>, escreva o que você quer anunciar.
+                        </p>
+                        <div className="p-3 bg-black/40 rounded-xl border border-white/5 text-[11px] font-mono text-cyber-blue/90 space-y-1">
+                          <span className="text-white/40 block text-[9px] uppercase font-sans">Exemplo de briefing:</span>
+                          <em>"Supermercado São Bento: Fim de semana da carne. Picanha R$ 39,90, cerveja lata R$ 2,49. Ofertas válidas sexta e sábado."</em>
+                        </div>
+                        <p className="text-[11px] text-white/50">
+                          📸 <strong>Dica:</strong> Se você já tiver o panfleto impresso ou encarte, basta clicar no botão com o ícone de câmera para carregar a imagem. A IA lerá tudo automaticamente.
+                        </p>
+                      </div>
+
+                      {/* Passo 2 */}
+                      <div className="p-6 bg-white/[0.03] border border-white/10 rounded-3xl space-y-3">
+                        <div className="flex items-center gap-3">
+                          <span className="w-8 h-8 rounded-xl bg-cyber-blue/20 border border-cyber-blue/40 text-cyber-blue flex items-center justify-center font-black text-sm">2</span>
+                          <h4 className="text-sm font-black text-white uppercase tracking-wider">
+                            Escolha a Persona & Efeitos Sonoros
+                          </h4>
+                        </div>
+                        <p className="text-xs text-white/60 leading-relaxed">
+                          Selecione como a propaganda deve soar:
+                        </p>
+                        <ul className="text-xs space-y-2 text-white/70">
+                          <li className="flex items-start gap-2">
+                            <span className="text-cyber-blue font-bold">•</span>
+                            <span><strong>Persona:</strong> Escolha <em>Locutor de Varejão</em> (comerciais agressivos), <em>Dutra Clássico</em> (comercial padrão), <em>Caipira</em> (interior/agro), etc.</span>
+                          </li>
+                          <li className="flex items-start gap-2">
+                            <span className="text-cyber-blue font-bold">•</span>
+                            <span><strong>Perfil de SFX:</strong> Escolha <em>Varejo & Impacto</em> para vinhetas fortes, ou <em>Rádio FM</em> para som moderno de rádio.</span>
+                          </li>
+                          <li className="flex items-start gap-2">
+                            <span className="text-cyber-blue font-bold">•</span>
+                            <span><strong>Tempo do Spot:</strong> 15s (rápido), 30s (padrão de rádio), 45s ou 60s.</span>
+                          </li>
+                        </ul>
+                      </div>
+
+                      {/* Passo 3 */}
+                      <div className="p-6 bg-white/[0.03] border border-white/10 rounded-3xl space-y-3">
+                        <div className="flex items-center gap-3">
+                          <span className="w-8 h-8 rounded-xl bg-cyber-blue/20 border border-cyber-blue/40 text-cyber-blue flex items-center justify-center font-black text-sm">3</span>
+                          <h4 className="text-sm font-black text-white uppercase tracking-wider">
+                            Gere o Roteiro & o Áudio
+                          </h4>
+                        </div>
+                        <p className="text-xs text-white/60 leading-relaxed">
+                          Você tem duas opções no painel:
+                        </p>
+                        <div className="space-y-2">
+                          <div className="p-3 bg-cyber-blue/10 border border-cyber-blue/30 rounded-xl">
+                            <span className="text-xs font-black text-white uppercase block">Botão Azul "Gerar Spot Completo" (Recomendado):</span>
+                            <span className="text-[11px] text-white/60">Gera o roteiro de rádio e, logo em seguida, já produz a gravação de áudio automaticamente.</span>
+                          </div>
+                          <div className="p-3 bg-white/5 border border-white/10 rounded-xl">
+                            <span className="text-xs font-black text-white/70 uppercase block">Botão "Apenas Roteiro":</span>
+                            <span className="text-[11px] text-white/50">Cria somente o texto para você revisar ou imprimir antes de gravar.</span>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Passo 4 */}
+                      <div className="p-6 bg-white/[0.03] border border-white/10 rounded-3xl space-y-3">
+                        <div className="flex items-center gap-3">
+                          <span className="w-8 h-8 rounded-xl bg-cyber-blue/20 border border-cyber-blue/40 text-cyber-blue flex items-center justify-center font-black text-sm">4</span>
+                          <h4 className="text-sm font-black text-white uppercase tracking-wider">
+                            Ouça, Masterize & Baixe em WAV
+                          </h4>
+                        </div>
+                        <p className="text-xs text-white/60 leading-relaxed">
+                          Assim que o áudio terminar de ser gerado, o <strong>Player Master</strong> aparecerá com o controle completo:
+                        </p>
+                        <ul className="text-xs space-y-2 text-white/70">
+                          <li className="flex items-start gap-2">
+                            <span className="text-cyber-blue font-bold">•</span>
+                            <span><strong>Play/Pause:</strong> Ouça com os efeitos aplicados em tempo real (Rádio FM, Grave Titânico, Arena, etc.).</span>
+                          </li>
+                          <li className="flex items-start gap-2">
+                            <span className="text-cyber-blue font-bold">•</span>
+                            <span><strong>Exportar Master (FX):</strong> Baixa o arquivo <code>.WAV</code> pronto para veicular no rádio ou carro de som com toda a compressão e processamento.</span>
+                          </li>
+                          <li className="flex items-start gap-2">
+                            <span className="text-cyber-blue font-bold">•</span>
+                            <span><strong>WAV Clean:</strong> Baixa a voz pura de estúdio sem filtros para quem vai fazer a mixagem final em Reaper/Audacity/Pro Tools.</span>
+                          </li>
+                        </ul>
+                      </div>
+                    </div>
+
+                    {/* Botão de Exemplo Prático */}
+                    <div className="p-5 bg-gradient-to-r from-blue-900/40 to-slate-900 border border-cyber-blue/30 rounded-3xl flex flex-col sm:flex-row items-center justify-between gap-4">
+                      <div>
+                        <h5 className="text-xs font-black text-white uppercase tracking-wider">
+                          Quer ver na prática como funciona?
+                        </h5>
+                        <p className="text-[11px] text-white/50">
+                          Preencha um briefing de exemplo automaticamente para testar a geração em 1 clique.
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setTheme("Supermercado Estrela D'Alva: Festival de Carnes e Cervejas. Picanha Grill Fatiada de R$ 69,90 por apenas R$ 39,90 o quilo! Cerveja Heineken lata 350ml por R$ 4,19. Arroz Tio João 5kg só R$ 22,90. É só neste sábado e domingo ou enquanto durar o estoque. Corra pro Estrela D'Alva!");
+                          setSelectedPersona('varejao');
+                          setNarrativeStyle('retail_aggressive');
+                          setSfxProfile('retail_impact');
+                          setActiveAudioEffect('broadcast_fm');
+                          setTargetDuration(30);
+                          setShowTutorial(false);
+                          showSuccess("Exemplo carregado no estúdio! Clique em 'Gerar Spot Completo'.");
+                        }}
+                        className="btn-3d-blue !py-2.5 !px-6 text-xs uppercase font-black tracking-widest shrink-0"
+                      >
+                        Carregar Exemplo de Varejo
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* ABA 2: LOCUTORES & PERSONAS */}
+                {tutorialTab === 'personas' && (
+                  <div className="space-y-6">
+                    <div className="p-4 rounded-2xl bg-white/5 border border-white/10 text-xs leading-relaxed space-y-2">
+                      <h4 className="font-black text-white uppercase tracking-wider flex items-center gap-2">
+                        <Users className="w-4 h-4 text-cyber-blue" />
+                        Quem são os locutores?
+                      </h4>
+                      <p className="text-white/60">
+                        O sistema conta com dois locutores virtuais que podem atuar em <strong>Dueto</strong> (conversando ou fazendo coro) ou em <strong>Locutor Único</strong> (apenas a voz principal).
+                      </p>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      <div className="p-5 bg-black/40 border border-cyber-blue/30 rounded-3xl space-y-2">
+                        <div className="flex items-center gap-2 text-cyber-blue font-black text-xs uppercase tracking-wider">
+                          <User className="w-4 h-4" /> Locutor Principal (DUTRA)
+                        </div>
+                        <p className="text-xs text-white/70 leading-relaxed">
+                          É a voz líder do spot. Responsável pela abertura impactante, pelas ofertas centrais e pelo fechamento da chamada para ação (CTA). Assume a persona selecionada abaixo.
+                        </p>
+                      </div>
+
+                      <div className="p-5 bg-black/40 border border-white/10 rounded-3xl space-y-2">
+                        <div className="flex items-center gap-2 text-white/60 font-black text-xs uppercase tracking-wider">
+                          <Users className="w-4 h-4" /> Segunda Voz (SAMUCA)
+                        </div>
+                        <p className="text-xs text-white/70 leading-relaxed">
+                          Usado no modo Dueto para dar dinamismo, fazer perguntas, reforçar preços ou criar diálogo descontraído com o locutor principal.
+                        </p>
+                      </div>
+                    </div>
+
+                    {/* Personas Explicadas */}
+                    <div className="space-y-3">
+                      <h4 className="text-xs font-black uppercase tracking-[0.2em] text-cyber-blue">
+                        Guia das 6 Personas Disponíveis:
+                      </h4>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        {[
+                          { name: 'Dutra Clássico', icon: '🎙️', desc: 'Voz padrão de rádio comercial. Equilibrada, autoritária, confiável. Ideal para comércios em geral, prestadores de serviços e rádio diária.' },
+                          { name: 'Locutor de Varejão', icon: '📢', desc: 'Estilo feirão e hipermercado. Rápido, enérgico, enfático, com chamada para preços imperdíveis e senso de urgência máxima.' },
+                          { name: 'Institucional Elegante', icon: '💎', desc: 'Tom aveludado, suave e requintado. Perfeito para concessionárias, joalherias, clínicas, imobiliárias de luxo e marcas nobres.' },
+                          { name: 'Locutor Caipira / Agro', icon: '🌾', desc: 'Sotaque acolhedor do interior ("uai", "sô", "trem bão"). Excelente para agropecuárias, casas de ração, rodeios e feirões rurais.' },
+                          { name: 'Sensacionalista / Plantão', icon: '🚨', desc: 'Estilo "urgente / breaking news". Tom alarmante para promoções relâmpago que o cliente não pode perder de jeito nenhum.' },
+                          { name: 'Descontraído / Jovem', icon: '🔥', desc: 'Linguagem solta, informal e moderna. Ideal para hamburguerias, eventos universitários, lojas de roupas e tecnologia.' },
+                        ].map((p, idx) => (
+                          <div key={idx} className="p-4 bg-white/[0.02] border border-white/5 rounded-2xl space-y-1">
+                            <div className="flex items-center gap-2 text-xs font-black text-white uppercase tracking-wide">
+                              <span>{p.icon}</span>
+                              <span>{p.name}</span>
+                            </div>
+                            <p className="text-[11px] text-white/50 leading-relaxed">{p.desc}</p>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Chave Locutor Único */}
+                    <div className="p-4 bg-cyber-blue/10 border border-cyber-blue/20 rounded-2xl flex items-center justify-between gap-4">
+                      <div>
+                        <span className="text-xs font-black text-white uppercase block">
+                          Prefere apenas 1 locutor falando?
+                        </span>
+                        <span className="text-[11px] text-white/60">
+                          Basta marcar a opção <strong>"Locutor Único (Apenas Dutra)"</strong> na coluna de Personas.
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* ABA 3: EFEITOS SONOROS & MASTER DSP */}
+                {tutorialTab === 'effects' && (
+                  <div className="space-y-6">
+                    <div className="p-4 rounded-2xl bg-white/5 border border-white/10 text-xs leading-relaxed space-y-1">
+                      <h4 className="font-black text-white uppercase tracking-wider flex items-center gap-2">
+                        <Sliders className="w-4 h-4 text-cyber-blue" />
+                        O que é o Processamento DSP e a Sonoplastia?
+                      </h4>
+                      <p className="text-white/60">
+                        A produtora possui uma <strong>cadeia de processamento de áudio em tempo real</strong> (Digital Signal Processing) construída em Web Audio API. Ela simula processadores profissionais de estúdio como Orban Optimod e Omnia FM.
+                      </p>
+                    </div>
+
+                    {/* Presets Explicados */}
+                    <div className="space-y-3">
+                      <h4 className="text-xs font-black uppercase tracking-[0.2em] text-cyber-blue">
+                        1. Presets de Voz & Master:
+                      </h4>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3">
+                        {[
+                          { name: 'Voz Direta (Clean)', icon: '🎙️', desc: 'Áudio original de estúdio sem alterações, para quem quer o som natural.' },
+                          { name: 'Rádio FM Broadcast', icon: '📻', desc: 'Compressor óptico com reforço de brilho e presença. O clássico som de emissora FM.' },
+                          { name: 'Grave Titânico', icon: '💥', desc: 'Reforço ultra-pesado de sub-graves. A voz fica profunda como em trailers de cinema.' },
+                          { name: 'Megafone / Carro de Som', icon: '📣', desc: 'Filtro passa-banda telefônico e de corneta, com distorção característica de rua.' },
+                          { name: 'Arena & Rodeio', icon: '🏟️', desc: 'Reverb espacial com reflexões longas, simulando estádio, arena ou exposição.' },
+                          { name: 'Reverb Quântico', icon: '✨', desc: 'Ambiência suave de estúdio tratado acusticamente para dar vida à locução.' },
+                          { name: 'Eco de Vinheta (Delay)', icon: '🔁', desc: 'Repetições estéreo sincopadas para gerar o efeito de eco típico de rádio jovem.' },
+                          { name: 'Cyber Robótico', icon: '🤖', desc: 'Filtro comb e modulação metálica para anúncios futuristas e tecnológicos.' },
+                        ].map((item, idx) => (
+                          <div key={idx} className="p-3.5 bg-black/40 border border-white/5 rounded-2xl space-y-1">
+                            <div className="flex items-center gap-2 text-xs font-black text-white uppercase">
+                              <span className="text-base">{item.icon}</span>
+                              <span className="truncate">{item.name}</span>
+                            </div>
+                            <p className="text-[10px] text-white/40 leading-relaxed line-clamp-3">{item.desc}</p>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Controles de Mesa */}
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                      <div className="p-4 bg-white/[0.02] border border-white/10 rounded-2xl space-y-1">
+                        <span className="text-xs font-black text-cyber-blue uppercase block">Mix Wet / Dry</span>
+                        <p className="text-[11px] text-white/50 leading-relaxed">
+                          Define quanto do efeito você quer misturar com a voz original (0% = áudio puro; 85% = padrão equilibrado; 100% = efeito total).
+                        </p>
+                      </div>
+
+                      <div className="p-4 bg-white/[0.02] border border-white/10 rounded-2xl space-y-1">
+                        <span className="text-xs font-black text-cyber-blue uppercase block">Botão Bypass</span>
+                        <p className="text-[11px] text-white/50 leading-relaxed">
+                          Permite comparar o áudio com e sem efeitos na hora (comparação A/B instantânea) sem perder suas regulagens.
+                        </p>
+                      </div>
+
+                      <div className="p-4 bg-white/[0.02] border border-white/10 rounded-2xl space-y-1">
+                        <span className="text-xs font-black text-cyber-blue uppercase block">Equalizador 3 Bandas</span>
+                        <p className="text-[11px] text-white/50 leading-relaxed">
+                          Regule Graves (120Hz), Médios (1.5kHz) e Agudos (8kHz) em decibéis (-12dB a +12dB) no player ou no modal de efeitos.
+                        </p>
+                      </div>
+                    </div>
+
+                    {/* Cartwall */}
+                    <div className="p-4 bg-black/50 border border-white/10 rounded-2xl space-y-2">
+                      <div className="flex items-center gap-2 text-xs font-black text-white uppercase">
+                        <Disc className="w-4 h-4 text-cyber-blue" />
+                        2. Mesa de Disparo Rápido (Cartwall Soundboard):
+                      </div>
+                      <p className="text-[11px] text-white/60 leading-relaxed">
+                        No console e no player, você tem botões como <strong>💥 Impacto</strong>, <strong>🚀 Whoosh</strong>, <strong>🚨 Alerta</strong> e <strong>🔔 Sino</strong>. Eles são sons sintetizados na hora no seu navegador para você testar ideias de sonoplastia durante a produção.
+                      </p>
+                    </div>
+                  </div>
+                )}
+
+                {/* ABA 4: LEITURA DE IMAGEM */}
+                {tutorialTab === 'image' && (
+                  <div className="space-y-6">
+                    <div className="p-4 rounded-2xl bg-cyber-blue/10 border border-cyber-blue/30 text-xs text-cyber-cyan leading-relaxed">
+                      <strong>Tecnologia Multimodal Gemini:</strong> Você não precisa digitar toda a lista de preços do seu cliente! Basta tirar uma foto do panfleto, tabloide de ofertas ou card do Instagram.
+                    </div>
+
+                    <div className="space-y-4">
+                      <h4 className="text-xs font-black uppercase tracking-[0.2em] text-white">
+                        Como usar a leitura por imagem passo a passo:
+                      </h4>
+
+                      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                        <div className="p-5 bg-white/[0.03] border border-white/10 rounded-2xl space-y-2">
+                          <span className="text-lg font-mono text-cyber-blue font-bold">Passo 1</span>
+                          <h5 className="text-xs font-black text-white uppercase">Localize o Botão da Câmera</h5>
+                          <p className="text-[11px] text-white/50 leading-relaxed">
+                            No painel central, junto ao campo do briefing, clique no botão azul com o ícone de <strong>Câmera / Imagem</strong>.
+                          </p>
+                        </div>
+
+                        <div className="p-5 bg-white/[0.03] border border-white/10 rounded-2xl space-y-2">
+                          <span className="text-lg font-mono text-cyber-blue font-bold">Passo 2</span>
+                          <h5 className="text-xs font-black text-white uppercase">Selecione o Arquivo</h5>
+                          <p className="text-[11px] text-white/50 leading-relaxed">
+                            Suba um arquivo JPG, PNG ou WEBP do encarte de supermercado, panfleto da loja ou card de promoção.
+                          </p>
+                        </div>
+
+                        <div className="p-5 bg-white/[0.03] border border-white/10 rounded-2xl space-y-2">
+                          <span className="text-lg font-mono text-cyber-blue font-bold">Passo 3</span>
+                          <h5 className="text-xs font-black text-white uppercase">Clique em Gerar</h5>
+                          <p className="text-[11px] text-white/50 leading-relaxed">
+                            A IA lê os nomes das marcas, valores monetários e datas no encarte e monta um texto de alta conversão pronto para rádio.
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="p-4 bg-white/5 border border-white/10 rounded-2xl text-[11px] text-white/60 space-y-1">
+                      <span className="text-white font-bold uppercase block text-xs">💡 Dica para fotos:</span>
+                      <p>
+                        Tire a foto em ambiente bem iluminado e certifique-se de que os números de preços estão visíveis e nítidos para melhor precisão da IA.
+                      </p>
+                    </div>
+                  </div>
+                )}
+
+                {/* ABA 5: DICAS DE OURO & FAQ */}
+                {tutorialTab === 'faq' && (
+                  <div className="space-y-6">
+                    <div className="space-y-4">
+                      <h4 className="text-xs font-black uppercase tracking-[0.2em] text-cyber-blue">
+                        Perguntas Frequentes & Melhores Práticas:
+                      </h4>
+
+                      <div className="space-y-3">
+                        <div className="p-4 bg-white/[0.02] border border-white/10 rounded-2xl space-y-1">
+                          <span className="text-xs font-black text-white uppercase block">
+                            Quanto tempo dura cada spot e quantas palavras ele tem?
+                          </span>
+                          <p className="text-[11px] text-white/50 leading-relaxed">
+                            • <strong>15 segundos:</strong> Cerca de 30 a 35 palavras (ideal para chamadas relâmpago).<br/>
+                            • <strong>30 segundos (Mais usado):</strong> Cerca de 60 a 70 palavras (equilíbrio perfeito entre ofertas e assinatura).<br/>
+                            • <strong>45 segundos:</strong> Cerca de 95 a 105 palavras.<br/>
+                            • <strong>60 segundos:</strong> Cerca de 130 a 140 palavras (spots com muitas ofertas ou histórias institucionais).
+                          </p>
+                        </div>
+
+                        <div className="p-4 bg-white/[0.02] border border-white/10 rounded-2xl space-y-1">
+                          <span className="text-xs font-black text-white uppercase block">
+                            Qual a diferença entre "Exportar Master (FX)" e "WAV Clean"?
+                          </span>
+                          <p className="text-[11px] text-white/50 leading-relaxed">
+                            • <strong>Exportar Master (FX):</strong> Renderiza o áudio WAV com o preset escolhido (ex: Rádio FM, Grave Titânico) e o equalizador aplicados diretamente no arquivo. Pronto para tocar.<br/>
+                            • <strong>WAV Clean:</strong> Baixa apenas a voz sintetizada limpa sem nenhum efeito master, perfeito para produtores que montam trilhas e efeitos em programas como Reaper, Cubase ou Pro Tools.
+                          </p>
+                        </div>
+
+                        <div className="p-4 bg-white/[0.02] border border-white/10 rounded-2xl space-y-1">
+                          <span className="text-xs font-black text-white uppercase block">
+                            O que fazer se aparecer o erro "API Negada (Erro 403 / Permissão)"?
+                          </span>
+                          <p className="text-[11px] text-white/50 leading-relaxed">
+                            Clique no botão <strong>"Status da API"</strong> no cabeçalho. Lá você pode testar a conexão em tempo real e ver se a sua chave do Google AI Studio tem acesso habilitado à <em>Generative Language API</em>.
+                          </p>
+                        </div>
+
+                        <div className="p-4 bg-white/[0.02] border border-white/10 rounded-2xl space-y-1">
+                          <span className="text-xs font-black text-white uppercase block">
+                            Como salvar o texto do roteiro?
+                          </span>
+                          <p className="text-[11px] text-white/50 leading-relaxed">
+                            Ao lado do botão de áudio, clique em <strong>"Exportar TXT"</strong>. Ele salva um documento profissional com divisões de falas, indicações de sonoplastia (SFX) e sugestões de trilha sonora para seu arquivo de gravações.
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Rodapé do Modal */}
+              <div className="pt-4 border-t border-white/10 flex flex-col sm:flex-row justify-between items-center gap-3 shrink-0">
+                <span className="text-[11px] text-white/40 font-mono">
+                  D' MASTER PRODUTORA • Suporte & Operação Inteligente
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setShowTutorial(false)}
+                  className="btn-3d-blue !py-2.5 !px-8 text-xs uppercase tracking-widest font-black"
+                >
+                  Entendi, ir para o Estúdio!
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+
         {/* Floating Errors */}
         <AnimatePresence>
           {error && (
@@ -1569,14 +3316,20 @@ const App: React.FC = () => {
               initial={{ y: -50, opacity: 0 }}
               animate={{ y: 0, opacity: 1 }}
               exit={{ y: -50, opacity: 0 }}
-              className="fixed top-10 left-1/2 -translate-x-1/2 bg-cyber-blue text-deep-navy px-8 py-4 rounded-2xl shadow-[0_0_40px_rgba(0,242,255,0.5)] z-[200] border-t border-white/30 flex items-center gap-4"
+              className="fixed top-10 left-1/2 -translate-x-1/2 bg-slate-900 text-white px-6 md:px-8 py-4 rounded-2xl shadow-[0_0_50px_rgba(0,242,255,0.4)] z-[200] border border-cyber-blue/40 flex items-center gap-4 max-w-2xl w-[90%]"
             >
-              <AlertCircle className="w-6 h-6" />
-              <div className="flex flex-col">
-                <span className="text-[10px] font-black uppercase tracking-widest opacity-60">Mau Funcionamento do Sistema</span>
-                <span className="text-sm font-bold tracking-tight">{error}</span>
+              <AlertCircle className="w-6 h-6 text-cyber-blue shrink-0" />
+              <div className="flex flex-col flex-1 min-w-0">
+                <span className="text-[10px] font-black uppercase tracking-widest text-cyber-blue">Diagnóstico da Operação</span>
+                <span className="text-xs md:text-sm font-bold tracking-tight text-white/90 truncate">{error}</span>
               </div>
-              <button onClick={() => setError(null)} className="ml-4 hover:opacity-60 transition-opacity">
+              <button 
+                onClick={() => { setShowApiHelp(true); setError(null); }}
+                className="px-3 py-1.5 rounded-xl bg-cyber-blue text-deep-navy text-[11px] font-black uppercase tracking-wider hover:bg-cyber-cyan transition-all shrink-0 shadow-sm"
+              >
+                Como Resolver
+              </button>
+              <button onClick={() => setError(null)} className="hover:opacity-60 transition-opacity text-white/50 hover:text-white shrink-0">
                 <X className="w-4 h-4" />
               </button>
             </motion.div>

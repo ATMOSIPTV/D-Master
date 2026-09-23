@@ -3,5 +3,8 @@
   "description": "Um roteirista técnico avançado e motor de locução multi-voz com Fenrir e Sadaltager.",
   "requestFramePermissions": [
     "microphone"
+  ],
+  "capabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
   ]
 }

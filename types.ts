@@ -18,6 +18,11 @@ export interface ScriptOutput {
 
 export type VoiceName = 'Kore' | 'Puck' | 'Charon' | 'DUTRA' | 'Zephyr';
 
+export const getGeminiVoiceName = (voice: VoiceName): string => {
+  if (voice === 'DUTRA') return 'Fenrir';
+  return voice;
+};
+
 export const AVAILABLE_VOICES: { name: VoiceName; description: string; gender: 'M' | 'F' }[] = [
   { name: 'Charon', description: '1. MASCULINA SUPER GRAVE (Impacto, Autoridade e Motivação)', gender: 'M' },
   { name: 'DUTRA', description: '2. MASCULINA APOIO/PAPÉIS (Vendedor e Testemunhal)', gender: 'M' },
@@ -57,3 +62,143 @@ export const DURATIONS = [
 export const TONES = ['Vendedor', 'Institucional', 'Informativo', 'Sensacionalista', 'Descontraído'];
 export const EMPHASES = ['Velocidade Máxima', 'Pausas Dramáticas', 'Intensidade de Volume', 'Ritmo Musical'];
 export const EMOTIONS = ['Empolgado', 'Sério', 'Confiante', 'Amigável', 'Urgente'];
+
+export type AudioEffectPreset =
+  | 'none'
+  | 'broadcast_fm'
+  | 'radio_vintage'
+  | 'stadium_arena'
+  | 'studio_reverb'
+  | 'deep_bass'
+  | 'delay_echo'
+  | 'cyber_robot';
+
+export interface EffectPresetOption {
+  id: AudioEffectPreset;
+  label: string;
+  category: 'broadcast' | 'spatial' | 'creative';
+  description: string;
+  icon: string;
+  recommendedFor: string;
+}
+
+export const AUDIO_EFFECT_PRESETS: EffectPresetOption[] = [
+  {
+    id: 'none',
+    label: 'Voz Direta (Clean Studio)',
+    category: 'broadcast',
+    description: 'Áudio original limpo de estúdio, sem coloração artificial.',
+    icon: '🎙️',
+    recommendedFor: 'Locuções institucionais e podcasts'
+  },
+  {
+    id: 'broadcast_fm',
+    label: 'Rádio FM Broadcast',
+    category: 'broadcast',
+    description: 'Compressão dinâmica com punch, presença cristalina e brilho de alta frequência.',
+    icon: '📻',
+    recommendedFor: 'Comerciais de rádio FM e spots de varejo'
+  },
+  {
+    id: 'deep_bass',
+    label: 'Grave Titânico (Bass Booster)',
+    category: 'broadcast',
+    description: 'Reforço potente nos sub-graves para voz com autoridade máxima e peso.',
+    icon: '🔊',
+    recommendedFor: 'Spots de impacto, cinema e ofertas urgentes'
+  },
+  {
+    id: 'radio_vintage',
+    label: 'Megafone / Carro de Som',
+    category: 'creative',
+    description: 'Filtro passa-faixa com saturação harmônica e timbre metálico característico.',
+    icon: '📢',
+    recommendedFor: 'Carro de som de rua, anúncios populares e humor'
+  },
+  {
+    id: 'stadium_arena',
+    label: 'Arena & Rodeio (Estádio)',
+    category: 'spatial',
+    description: 'Grande reverb aberto com reflexões longas simulando som de arena esportiva.',
+    icon: '🏟️',
+    recommendedFor: 'Festas de peão, eventos esportivos e shows'
+  },
+  {
+    id: 'studio_reverb',
+    label: 'Reverb Quântico de Sala',
+    category: 'spatial',
+    description: 'Ambiência aveludada de estúdio de gravação de primeira linha.',
+    icon: '✨',
+    recommendedFor: 'Comerciais de luxo, marcas e mensagens motivacionais'
+  },
+  {
+    id: 'delay_echo',
+    label: 'Eco de Vinheta (Delay Rítmico)',
+    category: 'spatial',
+    description: 'Repetições estéreo suaves para criação de vinhetas e assinaturas de rádio.',
+    icon: '🌊',
+    recommendedFor: 'Vinhetas de rádio e transições de impacto'
+  },
+  {
+    id: 'cyber_robot',
+    label: 'Cyber Modulator (Robótico)',
+    category: 'creative',
+    description: 'Modulação metálica futurista com ambiência espacial.',
+    icon: '🤖',
+    recommendedFor: 'Spots de tecnologia, games e ficção'
+  }
+];
+
+export type SfxProfile =
+  | 'radio_standard'
+  | 'heavy_impact'
+  | 'sound_truck'
+  | 'news_flash'
+  | 'acoustic_clean';
+
+export interface SfxProfileOption {
+  id: SfxProfile;
+  label: string;
+  description: string;
+  icon: string;
+  tags: string[];
+}
+
+export const SFX_PROFILES: SfxProfileOption[] = [
+  {
+    id: 'radio_standard',
+    label: 'Rádio FM Padrão',
+    description: 'Whooshes de passagem, batidas de abertura e transições dinâmicas de rádio.',
+    icon: '📻',
+    tags: ['WHOOSH', 'TRANSITION', 'SWEEP']
+  },
+  {
+    id: 'heavy_impact',
+    label: 'Impacto Cinema & Varejo',
+    description: 'Sub-bass drops pesados, risers metálicos e impactos para chamar atenção total.',
+    icon: '💥',
+    tags: ['SUB_BOOM', 'METAL_HIT', 'EXPLOSION']
+  },
+  {
+    id: 'sound_truck',
+    label: 'Carro de Som & Arena',
+    description: 'Sirenes curtas, fanfarras, aplausos e sinos de anúncio popular.',
+    icon: '📢',
+    tags: ['SIREN', 'FANFARE', 'BELLS']
+  },
+  {
+    id: 'news_flash',
+    label: 'Plantão / Urgente',
+    description: 'Bips estilo código morse, pulso de urgência e alerta dramático.',
+    icon: '🚨',
+    tags: ['MORSE_BEEP', 'EMERGENCY_ALARM', 'URGENT_DRUM']
+  },
+  {
+    id: 'acoustic_clean',
+    label: 'Clean & Sofisticado',
+    description: 'Sem ruídos agressivos; transições suaves com sinos discretos e pads.',
+    icon: '✨',
+    tags: ['SOFT_CHIME', 'AMBIENT_SWELL', 'MINIMAL']
+  }
+];
+
